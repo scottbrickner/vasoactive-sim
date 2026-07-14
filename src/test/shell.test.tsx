@@ -1,0 +1,46 @@
+import { afterEach, describe, expect, it } from 'vitest'
+import { cleanup, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import App from '../App'
+import { useShellStore } from '../state/store'
+
+afterEach(() => {
+  cleanup()
+  // Reset the shell store between tests so phase transitions start from 'intro'.
+  useShellStore.setState({ phase: 'intro' })
+})
+
+describe('app shell', () => {
+  it('renders the branded header with sim clock, MAP, and target readouts', () => {
+    render(<App />)
+    const header = screen.getByRole('banner')
+    expect(within(header).getByText('Vasoactive Titration Simulator')).toBeInTheDocument()
+
+    const status = within(header).getByLabelText('Simulation status')
+    expect(within(status).getByText('Sim time')).toBeInTheDocument()
+    expect(within(status).getByText('00:00')).toBeInTheDocument()
+    expect(within(status).getByText('Current MAP')).toBeInTheDocument()
+    expect(within(status).getByText('—')).toBeInTheDocument() // MAP null before sim starts
+    expect(within(status).getByText('Target MAP')).toBeInTheDocument()
+    expect(within(status).getByText('≥ 65')).toBeInTheDocument()
+  })
+
+  it('starts on the Scenario Intro screen', () => {
+    render(<App />)
+    expect(screen.getByRole('heading', { name: 'Welcome to the simulation' })).toBeInTheDocument()
+  })
+
+  it('advances intro → sim → debrief → intro via the phase buttons', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByRole('button', { name: 'Begin simulation' }))
+    expect(screen.getByRole('heading', { name: 'Bedside workspace' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /End .* go to debrief/ }))
+    expect(screen.getByRole('heading', { name: "Nice work — let's review" })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Restart simulation' }))
+    expect(screen.getByRole('heading', { name: 'Welcome to the simulation' })).toBeInTheDocument()
+  })
+})

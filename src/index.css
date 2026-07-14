@@ -1,0 +1,83 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens — USC-branded APP SHELL palette (Phase 1).
+ * Single source of truth for Tailwind v4 utilities (bg-cardinal, text-gold, …).
+ * Mirrored for JS/inline use in src/design/tokens.ts — keep the two in sync.
+ * NOTE: this is the friendly shell register only; device-screen fidelity is a later phase.
+ */
+@theme {
+  /* Brand — USC Cardinal & Gold */
+  --color-cardinal: #990000;
+  --color-cardinal-dark: #7a0000;
+  --color-cardinal-light: #b32424;
+  --color-gold: #ffcc00;
+  --color-gold-dark: #e6b800;
+  --color-gold-soft: #fff3c4;
+
+  /* Warm neutral surfaces */
+  --color-bg: #faf8f5;
+  --color-surface: #ffffff;
+  --color-border: #e7e2da;
+  --color-ink: #1a1a1a;
+  --color-muted: #5b5750;
+
+  /* Semantic (AA on light surfaces) — tones for coaching, never walls of red */
+  --color-success: #2e7d32;
+  --color-warning: #b26a00;
+  --color-danger: #c62828;
+  --color-info: #1565c0;
+
+  /* Type families */
+  --font-heading: 'Montserrat', ui-sans-serif, system-ui, sans-serif;
+  --font-body: 'Source Sans 3 Variable', 'Source Sans 3', ui-sans-serif, system-ui, sans-serif;
+
+  /* Semantic spacing aliases (Tailwind's 4px base still available) */
+  --spacing-gutter: 1.5rem; /* 24px */
+  --spacing-section: 3rem; /* 48px */
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 9999px;
+
+  /* Soft warm shadows */
+  --shadow-sm: 0 1px 2px rgba(40, 30, 20, 0.06), 0 1px 1px rgba(40, 30, 20, 0.04);
+  --shadow-md: 0 4px 12px rgba(40, 30, 20, 0.08), 0 2px 4px rgba(40, 30, 20, 0.05);
+  --shadow-lg: 0 12px 32px rgba(40, 30, 20, 0.12), 0 4px 8px rgba(40, 30, 20, 0.06);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background-color: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+    font-synthesis-weight: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-heading);
+    font-weight: 600;
+    line-height: 1.2;
+    text-wrap: balance;
+  }
+
+  /* Visible, brand-tinted focus ring for keyboard users (WCAG AA, no color-only signaling elsewhere) */
+  :focus-visible {
+    outline: 2px solid var(--color-cardinal);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+}
