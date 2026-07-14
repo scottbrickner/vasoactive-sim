@@ -1,0 +1,201 @@
+/**
+ * Debrief scoring (BUILD_BRIEF §7 / §9.6): aggregates the sim session's log into a
+ * scorecard — order adherence, interval/increment compliance, agent sequencing, BCMA/
+ * I-TRACE verification, documentation cadence + placement, and provider-notification
+ * correctness — plus a non-punitive coaching summary (CLAUDE.md: never present an
+ * unsafe/off-order action as correct, but never punitive either).
+ *
+ * Pure — no store coupling; scoreSession() takes a plain snapshot of the relevant
+ * SimState fields (structurally compatible with useSimStore.getState()).
+ *
+ * NOT scored here: Block of Charting (the emergent pathway isn't built — Phase 7) and
+ * weight-based dosing correctness (a static engine property already covered by
+ * formulary.test.ts, not a per-session learner behavior).
+ */
+import { checkCadence } from './documentation'
+import type { Infusion, LogEntry, Order } from '../state/types'
+
+export interface ScoringInput {
+  orders: Order[]
+  infusions: Infusion[]
+  log: LogEntry[]
+  verificationFlags: Record<string, boolean>
+  adherenceFlags: Record<string, boolean>
+}
+
+export type ScoreStatus = 'met' | 'partial' | 'missed' | 'n/a'
+
+export interface ScoreCategory {
+  key: string
+  label: string
+  status: ScoreStatus
+  detail: string
+}
+
+export interface Scorecard {
+  categories: ScoreCategory[]
+  /** 0-100 mean over non-n/a categories (met=100, partial=50, missed=0); null if nothing was scoreable yet. */
+  overallPercent: number | null
+  strengths: string[]
+  opportunities: string[]
+}
+
+function statusFor(part: number, total: number): ScoreStatus {
+  if (total === 0) return 'n/a'
+  if (part === total) return 'met'
+  if (part === 0) return 'missed'
+  return 'partial'
+}
+
+function hasOwn(record: Record<string, boolean>, id: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, id)
+}
+
+export function scoreSession(input: ScoringInput): Scorecard {
+  const { orders, log, verificationFlags } = input
+  const doseEntries = log.filter((e) => e.type === 'action' && e.doseAction != null)
+  const categories: ScoreCategory[] = []
+
+  // 1. Order adherence — every initiate/titrate attempt, applied or not.
+  {
+    const applied = doseEntries.filter((e) => e.outcome === 'applied').length
+    categories.push({
+      key: 'adherence',
+      label: 'Order adherence',
+      status: statusFor(applied, doseEntries.length),
+      detail:
+        doseEntries.length === 0
+          ? 'No dose entries were made.'
+          : `${applied} of ${doseEntries.length} dose entries applied exactly as ordered.`,
+    })
+  }
+
+  // 2. Interval & increment compliance — titrations only ("initiate" has no increment/interval).
+  {
+    const titrations = doseEntries.filter((e) => e.doseAction === 'titrate')
+    const compliant = titrations.filter((e) => !e.violations?.intervalTooSoon && !e.violations?.wrongIncrement).length
+    categories.push({
+      key: 'intervalIncrement',
+      label: 'Titration interval & increment',
+      status: statusFor(compliant, titrations.length),
+      detail:
+        titrations.length === 0
+          ? 'No titrations were attempted.'
+          : compliant === titrations.length
+            ? `All ${titrations.length} titration(s) matched the ordered increment and interval.`
+            : `${titrations.length - compliant} of ${titrations.length} titration(s) used an incorrect increment or came sooner than the ordered interval.`,
+    })
+  }
+
+  // 3. Agent sequencing — never reaches "missed": the order/Guardrails check hard-blocks
+  // it, so an attempted violation is a knowledge gap to flag, not harm that occurred.
+  {
+    const sequencedOrders = orders.filter((o) => o.sequence > 1)
+    const sequenceAttempts = doseEntries.filter((e) => e.violations?.sequenceNotActivated)
+    // n/a both when the scenario has no multi-agent structure to violate, AND when
+    // nothing has been attempted yet at all — otherwise "no actions taken" would
+    // misleadingly score as "met" here while every other category correctly shows n/a.
+    const noActivityYet = doseEntries.length === 0
+    categories.push({
+      key: 'sequencing',
+      label: 'Agent sequencing',
+      status:
+        sequencedOrders.length === 0 || noActivityYet
+          ? 'n/a'
+          : sequenceAttempts.length === 0
+            ? 'met'
+            : 'partial',
+      detail:
+        sequencedOrders.length === 0
+          ? 'This scenario has a single agent — no sequencing to assess.'
+          : noActivityYet
+            ? 'No actions were taken yet.'
+            : sequenceAttempts.length === 0
+              ? 'No attempt was made to start a later agent before its activation condition was met.'
+              : `${sequenceAttempts.length} attempt(s) to start or titrate a later agent before its activation condition was met — correctly blocked, not applied.`,
+    })
+  }
+
+  // 4. BCMA / I-TRACE verification. Vasoactives are NOT high-alert at this institution
+  // (see CLAUDE.md) — this is single-nurse verification, not an independent two-nurse
+  // double-check. `verificationFlags` is only ever set for Begin Bag / dose-entry
+  // actions (never provider notifications or charting), so membership alone identifies
+  // the verifiable actions without any string matching.
+  {
+    const verifiable = log.filter((e) => e.type === 'action' && hasOwn(verificationFlags, e.id))
+    const verified = verifiable.filter((e) => verificationFlags[e.id]).length
+    categories.push({
+      key: 'verification',
+      label: 'BCMA / I-TRACE verification',
+      status: statusFor(verified, verifiable.length),
+      detail:
+        verifiable.length === 0
+          ? 'No actions requiring verification were taken.'
+          : `${verified} of ${verifiable.length} actions had BCMA + I-TRACE verification confirmed before programming.`,
+    })
+  }
+
+  // 5. Documentation cadence & placement. Placement is structurally enforced by the UI
+  // (see engine/documentation.ts's doc comment) so only cadence can actually vary by
+  // learner behavior — one iView charting satisfies every infusion's pending checkpoint
+  // at that moment, since it documents the whole patient, not one drug.
+  {
+    const chartedMinutes = log.filter((e) => e.type === 'documentation' && e.location === 'iView').map((e) => e.minute)
+    const allChecks = orders.flatMap((order) => {
+      const initiation = doseEntries.find(
+        (e) => e.orderId === order.id && e.doseAction === 'initiate' && e.outcome === 'applied',
+      )
+      if (!initiation) return []
+      const titrationMinutes = doseEntries
+        .filter((e) => e.orderId === order.id && e.doseAction === 'titrate' && e.outcome === 'applied')
+        .map((e) => e.minute)
+        .sort((a, b) => a - b)
+      return checkCadence(initiation.minute, titrationMinutes, chartedMinutes)
+    })
+    const met = allChecks.filter((c) => c.met).length
+    categories.push({
+      key: 'documentation',
+      label: 'Documentation cadence & placement',
+      status: statusFor(met, allChecks.length),
+      detail:
+        allChecks.length === 0
+          ? 'No infusion was started, so no documentation was due.'
+          : `${met} of ${allChecks.length} required checkpoints were charted (MAR/iView placement is system-enforced and always correct).`,
+    })
+  }
+
+  // 6. Provider notification correctness.
+  {
+    const neededEvents = doseEntries.filter((e) => e.outcome === 'needs-provider')
+    const notifications = log.filter((e) => e.isProviderNotification)
+    const satisfied = neededEvents.filter((e) =>
+      notifications.some((n) => n.orderId === e.orderId && n.minute >= e.minute),
+    ).length
+    categories.push({
+      key: 'providerNotification',
+      label: 'Provider notification',
+      status: statusFor(satisfied, neededEvents.length),
+      detail:
+        neededEvents.length === 0
+          ? 'No situation requiring provider notification came up.'
+          : `${satisfied} of ${neededEvents.length} provider-notification requirements were followed by an actual notification.`,
+    })
+  }
+
+  const scored = categories.filter((c) => c.status !== 'n/a')
+  const overallPercent =
+    scored.length === 0
+      ? null
+      : Math.round(
+          (scored.reduce((sum, c) => sum + (c.status === 'met' ? 1 : c.status === 'partial' ? 0.5 : 0), 0) /
+            scored.length) *
+            100,
+        )
+
+  const strengths = categories.filter((c) => c.status === 'met').map((c) => `${c.label}: ${c.detail}`)
+  const opportunities = categories
+    .filter((c) => c.status === 'partial' || c.status === 'missed')
+    .map((c) => `${c.label}: ${c.detail}`)
+
+  return { categories, overallPercent, strengths, opportunities }
+}

@@ -10,9 +10,9 @@
  * be within Guardrails limits while still being off-order (wrong increment), and vice
  * versa (see titrationEngine.ts's module doc).
  */
-import type { DrugDefinition, Order } from '../state/types'
+import type { DrugDefinition, GuardrailStatus, Order } from '../state/types'
 
-export type GuardrailStatus = 'withinLimits' | 'softLimitOverride' | 'hardLimitBlocked'
+export type { GuardrailStatus }
 
 export interface GuardrailLimits {
   hardMin: number

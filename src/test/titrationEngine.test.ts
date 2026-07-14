@@ -35,7 +35,7 @@ describe('titrationEngine — initiation', () => {
       currentMap: belowTargetMap,
       priorAgentActivationMet: true,
     })
-    expect(result).toEqual({ status: 'ok', reasons: [] })
+    expect(result).toEqual({ status: 'ok', reasons: [], violations: {} })
   })
 
   it('off-order when the entered dose does not match the order start dose', () => {
@@ -51,18 +51,20 @@ describe('titrationEngine — initiation', () => {
     })
     expect(result.status).toBe('off-order')
     expect(result.reasons[0]).toMatch(/starting dose is 0\.5/i)
+    expect(result.violations).toEqual({ wrongStartDose: true })
   })
 })
 
 describe('titrationEngine — titration mechanics', () => {
   it('ok for a correctly timed, correctly incremented titration', () => {
-    expect(base()).toEqual({ status: 'ok', reasons: [] })
+    expect(base()).toEqual({ status: 'ok', reasons: [], violations: {} })
   })
 
   it('off-order when titrated sooner than the minimum interval', () => {
     const result = base({ currentMinute: 2 })
     expect(result.status).toBe('off-order')
     expect(result.reasons.some((r) => /interval/i.test(r))).toBe(true)
+    expect(result.violations.intervalTooSoon).toBe(true)
   })
 
   it('remains ok when titrated later than the reassessment window (not a hard cutoff)', () => {
@@ -74,10 +76,13 @@ describe('titrationEngine — titration mechanics', () => {
     const result = base({ proposedDose: 2 }) // delta 1.5, ordered increment is 0.5
     expect(result.status).toBe('off-order')
     expect(result.reasons.some((r) => /increment/i.test(r))).toBe(true)
+    expect(result.violations.wrongIncrement).toBe(true)
   })
 
   it('off-order when the proposed dose is zero or negative', () => {
-    expect(base({ proposedDose: 0 }).status).toBe('off-order')
+    const zero = base({ proposedDose: 0 })
+    expect(zero.status).toBe('off-order')
+    expect(zero.violations).toEqual({ invalidDose: true })
     expect(base({ proposedDose: -0.5 }).status).toBe('off-order')
   })
 
@@ -92,7 +97,7 @@ describe('titrationEngine — titration mechanics', () => {
       currentMap: belowTargetMap,
       priorAgentActivationMet: true,
     })
-    expect(result).toEqual({ status: 'ok', reasons: [] })
+    expect(result).toEqual({ status: 'ok', reasons: [], violations: {} })
   })
 })
 
@@ -101,6 +106,7 @@ describe('titrationEngine — target', () => {
     const result = base({ currentMap: atTargetMap })
     expect(result.status).toBe('off-order')
     expect(result.reasons.some((r) => /target already met/i.test(r))).toBe(true)
+    expect(result.violations.targetAlreadyMet).toBe(true)
   })
 })
 
@@ -109,11 +115,13 @@ describe('titrationEngine — max dose and provider notification', () => {
     const result = base({ currentDose: 29.5, proposedDose: 30.5, currentMap: belowTargetMap })
     expect(result.status).toBe('needs-provider')
     expect(result.reasons[0]).toMatch(/exceeds the ordered maximum/i)
+    expect(result.violations).toEqual({ exceedsOrderMax: true })
   })
 
   it('off-order (not needs-provider) when the proposed dose exceeds the order max but target is already met', () => {
     const result = base({ currentDose: 29.5, proposedDose: 30.5, currentMap: atTargetMap })
     expect(result.status).toBe('off-order')
+    expect(result.violations).toEqual({ exceedsOrderMax: true })
   })
 })
 
@@ -131,6 +139,7 @@ describe('titrationEngine — multi-agent sequence', () => {
     })
     expect(result.status).toBe('off-order')
     expect(result.reasons[0]).toBe(vasopressinOrder.activatesWhen)
+    expect(result.violations).toEqual({ sequenceNotActivated: true })
   })
 
   it('ok to initiate a sequence > 1 agent once its activation condition is met', () => {
@@ -144,7 +153,7 @@ describe('titrationEngine — multi-agent sequence', () => {
       currentMap: belowTargetMap,
       priorAgentActivationMet: true,
     })
-    expect(result).toEqual({ status: 'ok', reasons: [] })
+    expect(result).toEqual({ status: 'ok', reasons: [], violations: {} })
   })
 
   it('sequence 1 orders ignore priorAgentActivationMet', () => {

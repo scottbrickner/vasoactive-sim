@@ -136,6 +136,24 @@ export type DocumentationCadencePoint =
   | 'preTitration'
   | 'plus30PostTitration'
 
+/**
+ * Structured reasons a titration/initiation was off-order or needs-provider (see
+ * engine/titrationEngine.ts). Kept alongside the human-readable `reasons` there so
+ * scoring.ts can check specific rules without parsing prose.
+ */
+export interface TitrationViolations {
+  invalidDose?: boolean
+  sequenceNotActivated?: boolean
+  wrongStartDose?: boolean
+  exceedsOrderMax?: boolean
+  targetAlreadyMet?: boolean
+  intervalTooSoon?: boolean
+  wrongIncrement?: boolean
+}
+
+/** Alaris Guardrails dose evaluation outcome (see engine/guardrails.ts). */
+export type GuardrailStatus = 'withinLimits' | 'softLimitOverride' | 'hardLimitBlocked'
+
 export interface LogEntry {
   id: string
   /** Sim clock minute at which this entry was recorded. */
@@ -146,6 +164,19 @@ export interface LogEntry {
   location?: DocumentationLocation
   /** Vitals captured at the time of a documentation entry. */
   vitalsSnapshot?: VitalSigns
+  /** Present on dose-entry (and Begin Bag) action entries: which order/drug this concerns. */
+  orderId?: string
+  drugId?: DrugId
+  /** Present on dose-entry action entries: initiate vs titrate. */
+  doseAction?: 'initiate' | 'titrate'
+  /** Present on dose-entry action entries: what actually happened to the request. */
+  outcome?: 'applied' | 'off-order' | 'needs-provider' | 'hardLimitBlocked'
+  /** Present on off-order/needs-provider dose-entry entries: which specific rule(s) were violated. */
+  violations?: TitrationViolations
+  /** Present on dose-entry action entries: the Guardrails pump evaluation. */
+  guardrailStatus?: GuardrailStatus
+  /** True on the entry logged by notifyProvider — distinguishes it from Begin Bag/dose entries. */
+  isProviderNotification?: boolean
 }
 
 export interface Patient {

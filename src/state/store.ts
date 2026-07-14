@@ -118,6 +118,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
       minute: state.clockMinutes,
       type: 'action',
       summary: `Begin Bag verified for ${drug.name} — label matches order, bag matches pump program, line traced to patient (I-TRACE).`,
+      orderId: infusion.orderId,
+      drugId: infusion.drugId,
+      outcome: 'applied',
     }
     const marEntry: LogEntry = {
       id: nextId('log'),
@@ -125,6 +128,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
       type: 'documentation',
       location: correctLocationFor('beginBag'),
       summary: `Begin Bag charted in MAR: ${drug.name}.`,
+      orderId: infusion.orderId,
+      drugId: infusion.drugId,
     }
 
     set((s) => ({
@@ -173,13 +178,23 @@ export const useSimStore = create<SimStore>((set, get) => ({
     })
 
     const applied = guardEval.status !== 'hardLimitBlocked' && result.status === 'ok'
-    const outcome = applied ? 'applied' : guardEval.status === 'hardLimitBlocked' ? 'hardLimitBlocked' : result.status
+    // result.status is 'ok' only when applied is true (see the `applied` check above), so
+    // the else-else branch below never actually sees 'ok' — the cast reflects that.
+    const outcome = (
+      applied ? 'applied' : guardEval.status === 'hardLimitBlocked' ? 'hardLimitBlocked' : result.status
+    ) as 'applied' | 'off-order' | 'needs-provider' | 'hardLimitBlocked'
 
     const entry: LogEntry = {
       id: nextId('log'),
       minute: state.clockMinutes,
       type: 'action',
       summary: `${action === 'initiate' ? 'Initiate' : 'Titrate'} ${drug.name} to ${dose} ${drug.unit} — ${outcome}.`,
+      orderId: order.id,
+      drugId: order.drugId,
+      doseAction: action,
+      outcome,
+      violations: result.violations,
+      guardrailStatus: guardEval.status,
     }
 
     set((s) => ({
@@ -280,6 +295,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
       minute: state.clockMinutes,
       type: 'action',
       summary: `Provider notified${drug ? ` regarding ${drug.name}` : ''}${reason ? `: ${reason}` : '.'}`,
+      orderId: order?.id,
+      drugId: order?.drugId,
+      isProviderNotification: true,
     }
     set((s) => ({
       log: [...s.log, entry],

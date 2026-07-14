@@ -11,7 +11,7 @@
  * vice versa — the sim evaluates both (CLINICAL_SPEC.md #6).
  */
 import { isTitrationIntervalSatisfied } from './clock'
-import type { Order, TitrationTarget } from '../state/types'
+import type { Order, TitrationTarget, TitrationViolations } from '../state/types'
 
 export type TitrationAction = 'initiate' | 'titrate'
 export type TitrationStatus = 'ok' | 'off-order' | 'needs-provider'
@@ -37,6 +37,8 @@ export interface TitrationRequest {
 export interface TitrationResult {
   status: TitrationStatus
   reasons: string[]
+  /** Structured mirror of `reasons` — see TitrationViolations doc (state/types.ts) for why. */
+  violations: TitrationViolations
 }
 
 const EPSILON = 1e-9
@@ -66,22 +68,24 @@ export function evaluateTitration(request: TitrationRequest): TitrationResult {
   } = request
 
   if (proposedDose <= 0) {
-    return { status: 'off-order', reasons: ['Dose must be greater than 0.'] }
+    return { status: 'off-order', reasons: ['Dose must be greater than 0.'], violations: { invalidDose: true } }
   }
 
   if (order.sequence > 1 && !priorAgentActivationMet) {
     return {
       status: 'off-order',
       reasons: [order.activatesWhen ?? 'This agent has not yet been activated by the order.'],
+      violations: { sequenceNotActivated: true },
     }
   }
 
   if (action === 'initiate') {
     return nearlyEqual(proposedDose, order.startDose)
-      ? { status: 'ok', reasons: [] }
+      ? { status: 'ok', reasons: [], violations: {} }
       : {
           status: 'off-order',
           reasons: [`Ordered starting dose is ${order.startDose}; entered ${proposedDose}.`],
+          violations: { wrongStartDose: true },
         }
   }
 
@@ -95,29 +99,35 @@ export function evaluateTitration(request: TitrationRequest): TitrationResult {
           reasons: [
             `Requested dose exceeds the ordered maximum (${order.maxDose}) with ${order.target.metric} still below target — notify the provider before proceeding.`,
           ],
+          violations: { exceedsOrderMax: true },
         }
       : {
           status: 'off-order',
           reasons: [`Requested dose exceeds the ordered maximum (${order.maxDose}).`],
+          violations: { exceedsOrderMax: true },
         }
   }
 
   const reasons: string[] = []
+  const violations: TitrationViolations = {}
 
   if (targetMet && proposedDose > currentDose) {
     reasons.push(
       `Target already met (${order.target.metric} ${order.target.comparator} ${order.target.value} ${order.target.unit}) — further up-titration is not indicated.`,
     )
+    violations.targetAlreadyMet = true
   }
 
   if (lastActionMinute != null && !isTitrationIntervalSatisfied(currentMinute, lastActionMinute, order.interval)) {
     reasons.push(`Minimum interval not met — ${order.interval.minMinutes} min required since the last change.`)
+    violations.intervalTooSoon = true
   }
 
   const delta = Math.abs(proposedDose - currentDose)
   if (!nearlyEqual(delta, order.increment)) {
     reasons.push(`Ordered increment is ${order.increment}; requested change is ${delta}.`)
+    violations.wrongIncrement = true
   }
 
-  return reasons.length > 0 ? { status: 'off-order', reasons } : { status: 'ok', reasons }
+  return reasons.length > 0 ? { status: 'off-order', reasons, violations } : { status: 'ok', reasons: [], violations: {} }
 }
