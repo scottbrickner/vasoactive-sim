@@ -34,6 +34,8 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
     channel: 'A',
     beginBagCompleted: false,
     lastActionMinute: null,
+    stoppedAtMinute: null,
+    rateBeforePause: null,
   },
   orders: [
     {

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { alaris } from '../../design/deviceTokens'
 import { Button } from '../../design/primitives'
+import { isPastRemovalThreshold, minutesStopped } from '../../engine/infusionLifecycle'
 import type { DrugDefinition, Infusion, Order } from '../../state/types'
 
 export interface PumpChannelInfo {
@@ -15,7 +16,12 @@ export interface PumpChannelInfo {
 
 export interface AlarisPumpProps {
   channels: PumpChannelInfo[]
+  clockMinutes: number
   onRequestProgram: (orderId: string, dose: number) => void
+  /** Stops the infusion. Not verification-gated — no drug identity/dose is administered by pausing. */
+  onPause: (infusionId: string) => void
+  onRequestRestart: (infusionId: string) => void
+  onRequestDiscontinue: (infusionId: string) => void
   /** True while a verification confirmation is pending elsewhere on the page. */
   disabled?: boolean
 }
@@ -26,11 +32,28 @@ export interface AlarisPumpProps {
  * the sim never pre-fills or hints the correct value) and requests programming; the
  * actual Guardrails/order evaluation happens in the store after the verification gate.
  */
-export function AlarisPump({ channels, onRequestProgram, disabled }: AlarisPumpProps) {
+export function AlarisPump({
+  channels,
+  clockMinutes,
+  onRequestProgram,
+  onPause,
+  onRequestRestart,
+  onRequestDiscontinue,
+  disabled,
+}: AlarisPumpProps) {
   return (
     <div className="flex flex-col gap-3">
       {channels.map((info) => (
-        <PumpChannel key={info.order.id} info={info} onRequestProgram={onRequestProgram} disabled={disabled} />
+        <PumpChannel
+          key={info.order.id}
+          info={info}
+          clockMinutes={clockMinutes}
+          onRequestProgram={onRequestProgram}
+          onPause={onPause}
+          onRequestRestart={onRequestRestart}
+          onRequestDiscontinue={onRequestDiscontinue}
+          disabled={disabled}
+        />
       ))}
     </div>
   )
@@ -46,17 +69,29 @@ function channelStatus(info: PumpChannelInfo): { text: string; tone: ChannelTone
     return { text: 'AWAITING BEGIN BAG', tone: 'idle' }
   }
   if (info.infusion.status === 'infusing') return { text: 'INFUSING', tone: 'active' }
-  if (info.infusion.status === 'stopped') return { text: 'STOPPED', tone: 'stopped' }
+  if (info.infusion.status === 'stopped') return { text: 'PAUSED', tone: 'stopped' }
   return { text: 'READY TO PROGRAM', tone: 'idle' }
 }
 
 interface PumpChannelProps {
   info: PumpChannelInfo
+  clockMinutes: number
   onRequestProgram: (orderId: string, dose: number) => void
+  onPause: (infusionId: string) => void
+  onRequestRestart: (infusionId: string) => void
+  onRequestDiscontinue: (infusionId: string) => void
   disabled?: boolean
 }
 
-function PumpChannel({ info, onRequestProgram, disabled }: PumpChannelProps) {
+function PumpChannel({
+  info,
+  clockMinutes,
+  onRequestProgram,
+  onPause,
+  onRequestRestart,
+  onRequestDiscontinue,
+  disabled,
+}: PumpChannelProps) {
   const { order, drug, infusion, isActivated } = info
   const status = channelStatus(info)
   const [doseInput, setDoseInput] = useState('')
@@ -78,7 +113,8 @@ function PumpChannel({ info, onRequestProgram, disabled }: PumpChannelProps) {
     )
   }
 
-  const canProgram = (!infusion || infusion.beginBagCompleted) && !disabled
+  const paused = infusion?.status === 'stopped'
+  const canProgram = (!infusion || infusion.beginBagCompleted) && !disabled && !paused
   const parsed = Number(doseInput)
   const isValidNumber = doseInput.trim() !== '' && Number.isFinite(parsed) && parsed > 0
 
@@ -105,35 +141,74 @@ function PumpChannel({ info, onRequestProgram, disabled }: PumpChannelProps) {
             {order.startDose}–{order.maxDose} {drug.unit}
           </span>
         </div>
+        {paused && infusion?.stoppedAtMinute != null && (
+          <PausedNotice clockMinutes={clockMinutes} stoppedAtMinute={infusion.stoppedAtMinute} />
+        )}
       </div>
 
-      <div className="mt-3 flex items-center gap-2">
-        <label className="sr-only" htmlFor={`dose-${order.id}`}>
-          Dose ({drug.unit})
-        </label>
-        <input
-          id={`dose-${order.id}`}
-          type="number"
-          step="any"
-          inputMode="decimal"
-          value={doseInput}
-          onChange={(e) => setDoseInput(e.target.value)}
-          placeholder={`Dose (${drug.unit})`}
-          disabled={!canProgram}
-          className="h-9 w-32 rounded border bg-white px-2 font-mono text-sm text-ink disabled:opacity-50"
-          style={{ borderColor: alaris.lcdMuted }}
-        />
-        <Button
-          size="sm"
-          disabled={!canProgram || !isValidNumber}
-          onClick={() => {
-            onRequestProgram(order.id, parsed)
-            setDoseInput('')
-          }}
-        >
-          {infusion?.status === 'infusing' ? 'Titrate' : 'Program'}
-        </Button>
-      </div>
+      {paused && infusion ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button size="sm" disabled={disabled} onClick={() => onRequestRestart(infusion.id)}>
+            Restart at {infusion.rateBeforePause} {drug.unit}
+          </Button>
+          <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onRequestDiscontinue(infusion.id)}>
+            Discontinue
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <label className="sr-only" htmlFor={`dose-${order.id}`}>
+            Dose ({drug.unit})
+          </label>
+          <input
+            id={`dose-${order.id}`}
+            type="number"
+            step="any"
+            inputMode="decimal"
+            value={doseInput}
+            onChange={(e) => setDoseInput(e.target.value)}
+            placeholder={`Dose (${drug.unit})`}
+            disabled={!canProgram}
+            className="h-9 w-32 rounded border bg-white px-2 font-mono text-sm text-ink disabled:opacity-50"
+            style={{ borderColor: alaris.lcdMuted }}
+          />
+          <Button
+            size="sm"
+            disabled={!canProgram || !isValidNumber}
+            onClick={() => {
+              onRequestProgram(order.id, parsed)
+              setDoseInput('')
+            }}
+          >
+            {infusion?.status === 'infusing' ? 'Titrate' : 'Program'}
+          </Button>
+          {infusion?.status === 'infusing' && (
+            <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onPause(infusion.id)}>
+              Pause
+            </Button>
+          )}
+          {infusion && (
+            <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onRequestDiscontinue(infusion.id)}>
+              Discontinue
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PausedNotice({ clockMinutes, stoppedAtMinute }: { clockMinutes: number; stoppedAtMinute: number }) {
+  const elapsed = minutesStopped(clockMinutes, stoppedAtMinute)
+  const overdue = isPastRemovalThreshold(clockMinutes, stoppedAtMinute)
+  return (
+    <div
+      className="mt-2 rounded-sm px-2 py-1 text-xs font-semibold"
+      style={{ backgroundColor: overdue ? alaris.hardLimit : 'transparent', color: overdue ? '#fff' : alaris.lcdMuted }}
+    >
+      {overdue
+        ? `Paused ${elapsed} min — past 2 hr: remove from pump, disconnect, discard, notify provider.`
+        : `Paused ${elapsed} min ago.`}
     </div>
   )
 }

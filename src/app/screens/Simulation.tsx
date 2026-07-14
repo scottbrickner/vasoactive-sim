@@ -14,9 +14,14 @@ import {
 } from '../../devices'
 import { VerificationPanel } from '../VerificationPanel'
 import { ProviderNotifyControl } from '../ProviderNotifyControl'
+import { BlockOfChartingControl } from '../BlockOfChartingControl'
 import type { Infusion, Order } from '../../state/types'
 
-type PendingAction = { kind: 'beginBag'; infusionId: string } | { kind: 'dose'; orderId: string; dose: number }
+type PendingAction =
+  | { kind: 'beginBag'; infusionId: string }
+  | { kind: 'dose'; orderId: string; dose: number }
+  | { kind: 'restart'; infusionId: string }
+  | { kind: 'discontinue'; infusionId: string }
 
 interface PendingInfo {
   title: string
@@ -36,14 +41,38 @@ function buildPendingInfo(pending: PendingAction, infusions: Infusion[], orders:
       ],
     }
   }
-  const order = orders.find((o) => o.id === pending.orderId)
-  const drug = order ? getDrug(order.drugId) : null
+  if (pending.kind === 'dose') {
+    const order = orders.find((o) => o.id === pending.orderId)
+    const drug = order ? getDrug(order.drugId) : null
+    return {
+      title: `${drug?.name ?? ''} — ${pending.dose} ${drug?.unit ?? ''}`,
+      checklist: [
+        'Medication matches the MAR/order (BCMA scan).',
+        'Dose/rate matches what you intend to program.',
+        'Line traced to the patient (I-TRACE).',
+      ],
+    }
+  }
+  if (pending.kind === 'restart') {
+    const infusion = infusions.find((i) => i.id === pending.infusionId)
+    const drug = infusion ? getDrug(infusion.drugId) : null
+    return {
+      title: `Restart — ${drug?.name ?? ''}`,
+      checklist: [
+        'Medication matches the MAR/order (BCMA scan).',
+        'Resuming at the rate in effect immediately before the pause.',
+        'Line traced to the patient (I-TRACE).',
+      ],
+    }
+  }
+  const infusion = infusions.find((i) => i.id === pending.infusionId)
+  const drug = infusion ? getDrug(infusion.drugId) : null
   return {
-    title: `${drug?.name ?? ''} — ${pending.dose} ${drug?.unit ?? ''}`,
+    title: `Discontinue — ${drug?.name ?? ''}`,
     checklist: [
       'Medication matches the MAR/order (BCMA scan).',
-      'Dose/rate matches what you intend to program.',
-      'Line traced to the patient (I-TRACE).',
+      'Line disconnected from the patient and discarded.',
+      'Charted in MAR.',
     ],
   }
 }
@@ -71,6 +100,12 @@ export function Simulation() {
   const notifyProvider = useSimStore((s) => s.notifyProvider)
   const chartVitals = useSimStore((s) => s.chartVitals)
   const advanceClock = useSimStore((s) => s.advanceClock)
+  const pauseInfusion = useSimStore((s) => s.pauseInfusion)
+  const restartInfusion = useSimStore((s) => s.restartInfusion)
+  const discontinueInfusion = useSimStore((s) => s.discontinueInfusion)
+  const activeBlockOfCharting = useSimStore((s) => s.activeBlockOfCharting)
+  const declareBlockOfCharting = useSimStore((s) => s.declareBlockOfCharting)
+  const closeBlockOfCharting = useSimStore((s) => s.closeBlockOfCharting)
 
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
   const locked = pendingAction !== null
@@ -95,7 +130,9 @@ export function Simulation() {
   function handleConfirm() {
     if (!pendingAction) return
     if (pendingAction.kind === 'beginBag') completeBeginBag(pendingAction.infusionId)
-    else submitDose(pendingAction.orderId, pendingAction.dose)
+    else if (pendingAction.kind === 'dose') submitDose(pendingAction.orderId, pendingAction.dose)
+    else if (pendingAction.kind === 'restart') restartInfusion(pendingAction.infusionId)
+    else discontinueInfusion(pendingAction.infusionId)
     setPendingAction(null)
   }
 
@@ -144,10 +181,23 @@ export function Simulation() {
         <div className="flex flex-col gap-gutter">
           <AlarisPump
             channels={channels}
+            clockMinutes={clockMinutes}
             disabled={locked}
             onRequestProgram={(orderId, dose) => setPendingAction({ kind: 'dose', orderId, dose })}
+            onPause={pauseInfusion}
+            onRequestRestart={(infusionId) => setPendingAction({ kind: 'restart', infusionId })}
+            onRequestDiscontinue={(infusionId) => setPendingAction({ kind: 'discontinue', infusionId })}
           />
           <InfusionsPanel infusions={infusions} />
+          <BlockOfChartingControl
+            orders={orders}
+            infusions={infusions}
+            activeBlock={activeBlockOfCharting}
+            clockMinutes={clockMinutes}
+            disabled={locked}
+            onDeclare={declareBlockOfCharting}
+            onClose={closeBlockOfCharting}
+          />
           <ProviderNotifyControl
             disabled={locked}
             onNotify={(reason) => {

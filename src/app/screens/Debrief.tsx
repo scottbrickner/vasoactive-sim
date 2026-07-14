@@ -25,8 +25,9 @@ export function Debrief() {
   const log = useSimStore((s) => s.log)
   const verificationFlags = useSimStore((s) => s.verificationFlags)
   const adherenceFlags = useSimStore((s) => s.adherenceFlags)
+  const blockOfChartingHistory = useSimStore((s) => s.blockOfChartingHistory)
 
-  const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags })
+  const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory })
 
   const handleRestart = () => {
     startScenario(DEFAULT_SCENARIO)

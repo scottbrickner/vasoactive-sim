@@ -2,11 +2,12 @@ import { create } from 'zustand'
 import { advance, minutesElapsed } from '../engine/clock'
 import { correctLocationFor } from '../engine/documentation'
 import { evaluateDose, limitsFromOrder } from '../engine/guardrails'
+import { isBlockOverMaxDuration, isPastRemovalThreshold } from '../engine/infusionLifecycle'
 import { projectDoseResponse, projectMap, responseFraction, stepTowardTarget } from '../engine/physiology'
-import { evaluateTitration, type TitrationAction } from '../engine/titrationEngine'
+import { evaluateTitration, type TitrationAction, type TitrationResult } from '../engine/titrationEngine'
 import { getDrug } from '../data/formulary'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
-import type { Infusion, LogEntry, Order, Phase, ScenarioConfig } from './types'
+import type { BlockOfChartingRecord, Infusion, LogEntry, Order, Phase, ScenarioConfig } from './types'
 
 export type FeedbackTone = 'info' | 'success' | 'warning' | 'danger'
 
@@ -67,6 +68,8 @@ interface SimStore {
   verificationFlags: Record<string, boolean>
   adherenceFlags: Record<string, boolean>
   lastPhysiologyUpdate: { minute: number; map: number } | null
+  activeBlockOfCharting: BlockOfChartingRecord | null
+  blockOfChartingHistory: BlockOfChartingRecord[]
   feedback: FeedbackMessage | null
 
   setPhase: (phase: Phase) => void
@@ -80,6 +83,16 @@ interface SimStore {
   notifyProvider: (orderId: string, reason?: string) => void
   chartVitals: () => void
   advanceClock: (byMinutes: number) => void
+
+  /** Stops an infusing infusion. Not verification-gated — no drug identity/dose is being administered. */
+  pauseInfusion: (infusionId: string) => void
+  /** Resumes a paused infusion at the rate in effect immediately before pausing (RESTART_AFTER_PAUSE_RULE) — not a free-choice dose. */
+  restartInfusion: (infusionId: string) => void
+  /** Removes the infusion entirely (CP 4-156: removed from pump, disconnected, discarded) and charts in MAR. */
+  discontinueInfusion: (infusionId: string) => void
+  /** Declares an emergent Block of Charting for an already-infusing order — titrate-as-needed until closed. */
+  declareBlockOfCharting: (orderId: string) => void
+  closeBlockOfCharting: () => void
 }
 
 function initialSimFields(scenario: ScenarioConfig) {
@@ -93,6 +106,8 @@ function initialSimFields(scenario: ScenarioConfig) {
     verificationFlags: {} as Record<string, boolean>,
     adherenceFlags: {} as Record<string, boolean>,
     lastPhysiologyUpdate: null as { minute: number; map: number } | null,
+    activeBlockOfCharting: null as BlockOfChartingRecord | null,
+    blockOfChartingHistory: [] as BlockOfChartingRecord[],
     feedback: null as FeedbackMessage | null,
   }
 }
@@ -164,18 +179,39 @@ export const useSimStore = create<SimStore>((set, get) => ({
       return
     }
 
+    if (infusion && infusion.status === 'stopped') {
+      set({
+        feedback: {
+          tone: 'danger',
+          title: 'Infusion paused',
+          message: `${drug.name} is paused — restart at the prior rate, or discontinue, before titrating.`,
+        },
+      })
+      return
+    }
+
+    // Block of Charting (CP 4-156's emergent pathway): once declared for THIS order, the
+    // nurse may titrate as needed — order-compliance (interval/increment/max/sequence/
+    // target) is bypassed. Guardrails' hard limit is NOT bypassed: it's a mechanical pump
+    // ceiling, not a clinical judgment call, so even a declared emergency can't exceed it.
+    // Only applies to titrate — a block doesn't let you skip Begin Bag / start-dose rules
+    // for a brand-new infusion.
+    const blockActive = action === 'titrate' && state.activeBlockOfCharting?.orderId === orderId
+
     const guardEval = evaluateDose(dose, limitsFromOrder(order, drug))
-    const result = evaluateTitration({
-      action,
-      order,
-      currentDose: infusion?.rate ?? 0,
-      proposedDose: dose,
-      currentMinute: state.clockMinutes,
-      lastActionMinute: infusion?.lastActionMinute ?? null,
-      currentMap: state.vitals.map,
-      priorAgentActivationMet:
-        order.sequence === 1 || priorAgentsActivationMet(state.infusions, state.orders, state.vitals.map, order),
-    })
+    const result: TitrationResult = blockActive
+      ? { status: 'ok', reasons: [], violations: {} }
+      : evaluateTitration({
+          action,
+          order,
+          currentDose: infusion?.rate ?? 0,
+          proposedDose: dose,
+          currentMinute: state.clockMinutes,
+          lastActionMinute: infusion?.lastActionMinute ?? null,
+          currentMap: state.vitals.map,
+          priorAgentActivationMet:
+            order.sequence === 1 || priorAgentsActivationMet(state.infusions, state.orders, state.vitals.map, order),
+        })
 
     const applied = guardEval.status !== 'hardLimitBlocked' && result.status === 'ok'
     // result.status is 'ok' only when applied is true (see the `applied` check above), so
@@ -188,13 +224,15 @@ export const useSimStore = create<SimStore>((set, get) => ({
       id: nextId('log'),
       minute: state.clockMinutes,
       type: 'action',
-      summary: `${action === 'initiate' ? 'Initiate' : 'Titrate'} ${drug.name} to ${dose} ${drug.unit} — ${outcome}.`,
+      summary: `${action === 'initiate' ? 'Initiate' : 'Titrate'} ${drug.name} to ${dose} ${drug.unit} — ${outcome}${blockActive ? ' (Block of Charting)' : ''}.`,
       orderId: order.id,
       drugId: order.drugId,
       doseAction: action,
+      dose,
       outcome,
       violations: result.violations,
       guardrailStatus: guardEval.status,
+      underBlockOfCharting: blockActive || undefined,
     }
 
     set((s) => ({
@@ -252,6 +290,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
             channel: nextChannelLetter(s.infusions),
             beginBagCompleted: true,
             lastActionMinute: s.clockMinutes,
+            stoppedAtMinute: null,
+            rateBeforePause: null,
           }
       const infusions = infusion
         ? s.infusions.map((i) => (i.id === nextInfusion.id ? nextInfusion : i))
@@ -343,6 +383,190 @@ export const useSimStore = create<SimStore>((set, get) => ({
       map = stepTowardTarget(state.lastPhysiologyUpdate.map, projectedMap, fraction)
     }
 
-    set({ clockMinutes: nextMinute, vitals: { ...state.vitals, map } })
+    // Derived checks only — this clock never ticks on its own, so there's no live timer
+    // to own across windows (see engine/infusionLifecycle.ts's module doc). Default to
+    // whatever feedback was already showing; only overwrite it if a rule newly applies.
+    let feedback = state.feedback
+    const overdueInfusion = state.infusions.find(
+      (i) => i.status === 'stopped' && i.stoppedAtMinute != null && isPastRemovalThreshold(nextMinute, i.stoppedAtMinute),
+    )
+    if (overdueInfusion) {
+      const drug = getDrug(overdueInfusion.drugId)
+      feedback = {
+        tone: 'danger',
+        title: 'Infusion off for 2+ hours',
+        message: `${drug.name} has been paused for 2+ hours — per CP 4-156, remove it from the pump, disconnect, discard, and notify the provider.`,
+      }
+    }
+    if (state.activeBlockOfCharting && isBlockOverMaxDuration(state.activeBlockOfCharting.startMinute, nextMinute)) {
+      const drug = getDrug(state.activeBlockOfCharting.drugId)
+      feedback = {
+        tone: 'warning',
+        title: 'Block of Charting exceeds 4 hours',
+        message: `This Block of Charting for ${drug.name} has run past 4 hours — close it and open a new block per CP 4-156.`,
+      }
+    }
+
+    set({ clockMinutes: nextMinute, vitals: { ...state.vitals, map }, feedback })
+  },
+
+  pauseInfusion: (infusionId) => {
+    const state = get()
+    const infusion = state.infusions.find((i) => i.id === infusionId)
+    if (!infusion || infusion.status !== 'infusing') return
+    const drug = getDrug(infusion.drugId)
+    const entry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `${drug.name} paused at ${infusion.rate} ${drug.unit}.`,
+      orderId: infusion.orderId,
+      drugId: infusion.drugId,
+      lifecycleAction: 'pause',
+    }
+    set((s) => ({
+      infusions: s.infusions.map((i) =>
+        i.id === infusionId
+          ? { ...i, status: 'stopped', rate: 0, rateBeforePause: i.rate, stoppedAtMinute: s.clockMinutes }
+          : i,
+      ),
+      log: [...s.log, entry],
+      feedback: {
+        tone: 'info',
+        title: 'Infusion paused',
+        message: `${drug.name} stopped. Restart at the prior rate when appropriate, or discontinue.`,
+      },
+    }))
+  },
+
+  restartInfusion: (infusionId) => {
+    const state = get()
+    const infusion = state.infusions.find((i) => i.id === infusionId)
+    if (!infusion || infusion.status !== 'stopped' || infusion.rateBeforePause == null) return
+    const drug = getDrug(infusion.drugId)
+    const rate = infusion.rateBeforePause
+    const entry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `${drug.name} restarted at the rate in effect before the pause (${rate} ${drug.unit}).`,
+      orderId: infusion.orderId,
+      drugId: infusion.drugId,
+      dose: rate,
+      lifecycleAction: 'restart',
+    }
+    set((s) => ({
+      infusions: s.infusions.map((i) =>
+        i.id === infusionId
+          ? { ...i, status: 'infusing', rate, rateBeforePause: null, stoppedAtMinute: null, lastActionMinute: s.clockMinutes }
+          : i,
+      ),
+      log: [...s.log, entry],
+      verificationFlags: { ...s.verificationFlags, [entry.id]: true },
+      adherenceFlags: { ...s.adherenceFlags, [entry.id]: true },
+      lastPhysiologyUpdate: { minute: s.clockMinutes, map: s.vitals.map },
+      feedback: {
+        tone: 'success',
+        title: 'Infusion restarted',
+        message: `${drug.name} resumed at ${rate} ${drug.unit} — the rate in effect before the pause.`,
+      },
+    }))
+  },
+
+  discontinueInfusion: (infusionId) => {
+    const state = get()
+    const infusion = state.infusions.find((i) => i.id === infusionId)
+    if (!infusion) return
+    const drug = getDrug(infusion.drugId)
+    const actionEntry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `${drug.name} discontinued — removed from the pump, disconnected, discarded.`,
+      orderId: infusion.orderId,
+      drugId: infusion.drugId,
+      lifecycleAction: 'discontinue',
+    }
+    const marEntry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'documentation',
+      location: correctLocationFor('discontinuation'),
+      summary: `Discontinuation charted in MAR: ${drug.name}.`,
+      orderId: infusion.orderId,
+      drugId: infusion.drugId,
+    }
+    set((s) => ({
+      infusions: s.infusions.filter((i) => i.id !== infusionId),
+      log: [...s.log, actionEntry, marEntry],
+      verificationFlags: { ...s.verificationFlags, [actionEntry.id]: true },
+      adherenceFlags: { ...s.adherenceFlags, [actionEntry.id]: true },
+      feedback: {
+        tone: 'info',
+        title: 'Infusion discontinued',
+        message: `${drug.name} removed from the pump and charted in MAR.`,
+      },
+    }))
+  },
+
+  declareBlockOfCharting: (orderId) => {
+    const state = get()
+    if (state.activeBlockOfCharting) return
+    const order = state.orders.find((o) => o.id === orderId)
+    const infusion = state.infusions.find((i) => i.orderId === orderId)
+    if (!order || !infusion || infusion.status !== 'infusing') return
+    const drug = getDrug(order.drugId)
+    const block: BlockOfChartingRecord = {
+      id: nextId('block'),
+      orderId,
+      drugId: order.drugId,
+      startMinute: state.clockMinutes,
+      endMinute: null,
+    }
+    const entry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `Block of Charting declared for ${drug.name} — rapid titration in effect per CP 4-156.`,
+      orderId,
+      drugId: order.drugId,
+      lifecycleAction: 'blockDeclared',
+    }
+    set((s) => ({
+      activeBlockOfCharting: block,
+      log: [...s.log, entry],
+      feedback: {
+        tone: 'warning',
+        title: 'Block of Charting in effect',
+        message: `Titrate ${drug.name} as needed. Document time, rates, and parameters evaluated when you close the block.`,
+      },
+    }))
+  },
+
+  closeBlockOfCharting: () => {
+    const state = get()
+    const block = state.activeBlockOfCharting
+    if (!block) return
+    const drug = getDrug(block.drugId)
+    const closed: BlockOfChartingRecord = { ...block, endMinute: state.clockMinutes }
+    const entry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `Block of Charting closed for ${drug.name}.`,
+      orderId: block.orderId,
+      drugId: block.drugId,
+      lifecycleAction: 'blockClosed',
+    }
+    set((s) => ({
+      activeBlockOfCharting: null,
+      blockOfChartingHistory: [...s.blockOfChartingHistory, closed],
+      log: [...s.log, entry],
+      feedback: {
+        tone: 'success',
+        title: 'Block of Charting closed',
+        message: 'Confirm all required elements are documented: time/rates/max rate, parameters evaluated, provider notified.',
+      },
+    }))
   },
 }))

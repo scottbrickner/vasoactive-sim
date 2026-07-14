@@ -8,12 +8,11 @@
  * Pure — no store coupling; scoreSession() takes a plain snapshot of the relevant
  * SimState fields (structurally compatible with useSimStore.getState()).
  *
- * NOT scored here: Block of Charting (the emergent pathway isn't built — Phase 7) and
- * weight-based dosing correctness (a static engine property already covered by
- * formulary.test.ts, not a per-session learner behavior).
+ * NOT scored here: weight-based dosing correctness (a static engine property already
+ * covered by formulary.test.ts, not a per-session learner behavior).
  */
 import { checkCadence } from './documentation'
-import type { Infusion, LogEntry, Order } from '../state/types'
+import type { BlockOfChartingRecord, Infusion, LogEntry, Order } from '../state/types'
 
 export interface ScoringInput {
   orders: Order[]
@@ -21,6 +20,7 @@ export interface ScoringInput {
   log: LogEntry[]
   verificationFlags: Record<string, boolean>
   adherenceFlags: Record<string, boolean>
+  blockOfChartingHistory: BlockOfChartingRecord[]
 }
 
 export type ScoreStatus = 'met' | 'partial' | 'missed' | 'n/a'
@@ -52,27 +52,32 @@ function hasOwn(record: Record<string, boolean>, id: string): boolean {
 }
 
 export function scoreSession(input: ScoringInput): Scorecard {
-  const { orders, log, verificationFlags } = input
+  const { orders, log, verificationFlags, blockOfChartingHistory } = input
   const doseEntries = log.filter((e) => e.type === 'action' && e.doseAction != null)
+  // Order-compliance is deliberately bypassed under an active Block of Charting (CP
+  // 4-156's emergent pathway — see store.ts's submitDose) — those entries were never
+  // evaluated against the order, so grading them here would be meaningless. They're
+  // accounted for separately in category 7 below instead.
+  const normalDoseEntries = doseEntries.filter((e) => !e.underBlockOfCharting)
   const categories: ScoreCategory[] = []
 
   // 1. Order adherence — every initiate/titrate attempt, applied or not.
   {
-    const applied = doseEntries.filter((e) => e.outcome === 'applied').length
+    const applied = normalDoseEntries.filter((e) => e.outcome === 'applied').length
     categories.push({
       key: 'adherence',
       label: 'Order adherence',
-      status: statusFor(applied, doseEntries.length),
+      status: statusFor(applied, normalDoseEntries.length),
       detail:
-        doseEntries.length === 0
+        normalDoseEntries.length === 0
           ? 'No dose entries were made.'
-          : `${applied} of ${doseEntries.length} dose entries applied exactly as ordered.`,
+          : `${applied} of ${normalDoseEntries.length} dose entries applied exactly as ordered.`,
     })
   }
 
   // 2. Interval & increment compliance — titrations only ("initiate" has no increment/interval).
   {
-    const titrations = doseEntries.filter((e) => e.doseAction === 'titrate')
+    const titrations = normalDoseEntries.filter((e) => e.doseAction === 'titrate')
     const compliant = titrations.filter((e) => !e.violations?.intervalTooSoon && !e.violations?.wrongIncrement).length
     categories.push({
       key: 'intervalIncrement',
@@ -179,6 +184,29 @@ export function scoreSession(input: ScoringInput): Scorecard {
         neededEvents.length === 0
           ? 'No situation requiring provider notification came up.'
           : `${satisfied} of ${neededEvents.length} provider-notification requirements were followed by an actual notification.`,
+    })
+  }
+
+  // 7. Block of Charting documentation (CP 4-156's emergent rapid-titration pathway).
+  // Minimal state (just start/end minute) is enough — physiological-parameters-evaluated
+  // is derived from whether any iView charting fell inside the block's window, and
+  // provider notification from whether a notification followed the block's start.
+  {
+    const chartedMinutes = log.filter((e) => e.type === 'documentation' && e.location === 'iView').map((e) => e.minute)
+    const notifications = log.filter((e) => e.isProviderNotification)
+    const compliant = blockOfChartingHistory.filter((block) => {
+      const chartedDuring = chartedMinutes.some((m) => m >= block.startMinute && m <= (block.endMinute ?? Infinity))
+      const providerNotified = notifications.some((n) => n.orderId === block.orderId && n.minute >= block.startMinute)
+      return chartedDuring && providerNotified
+    }).length
+    categories.push({
+      key: 'blockOfCharting',
+      label: 'Block of Charting documentation',
+      status: statusFor(compliant, blockOfChartingHistory.length),
+      detail:
+        blockOfChartingHistory.length === 0
+          ? 'No Block of Charting episode occurred this session.'
+          : `${compliant} of ${blockOfChartingHistory.length} Block of Charting episode(s) had parameters charted and the provider notified.`,
     })
   }
 

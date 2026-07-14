@@ -205,12 +205,141 @@ describe('store — physiology wiring', () => {
           channel: 'B',
           beginBagCompleted: true,
           lastActionMinute: 0,
+          stoppedAtMinute: null,
+          rateBeforePause: null,
         },
       ],
       lastPhysiologyUpdate: { minute: 0, map: 63 },
     }))
     useSimStore.getState().advanceClock(5)
     expect(useSimStore.getState().vitals.map).toBeGreaterThanOrEqual(65)
+  })
+})
+
+describe('store — pause and restart', () => {
+  beforeEach(() => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+  })
+
+  it('pauseInfusion stops the infusion and records the pre-pause rate', () => {
+    useSimStore.getState().pauseInfusion(norepiInfusion().id)
+    const infusion = norepiInfusion()
+    expect(infusion.status).toBe('stopped')
+    expect(infusion.rate).toBe(0)
+    expect(infusion.rateBeforePause).toBe(0.5)
+    expect(infusion.stoppedAtMinute).toBe(0)
+    expect(useSimStore.getState().feedback).toMatchObject({ tone: 'info', title: 'Infusion paused' })
+  })
+
+  it('submitDose is rejected while paused, directing the nurse to restart or discontinue', () => {
+    useSimStore.getState().pauseInfusion(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1)
+    expect(norepiInfusion().rate).toBe(0)
+    expect(useSimStore.getState().feedback).toMatchObject({ tone: 'danger', title: 'Infusion paused' })
+  })
+
+  it('restartInfusion resumes at the rate in effect before the pause, not order.startDose', () => {
+    useSimStore.getState().advanceClock(10)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // titrate first so pre-pause rate != startDose
+    useSimStore.getState().pauseInfusion(norepiInfusion().id)
+    useSimStore.getState().advanceClock(5)
+    useSimStore.getState().restartInfusion(norepiInfusion().id)
+    const infusion = norepiInfusion()
+    expect(infusion.status).toBe('infusing')
+    expect(infusion.rate).toBe(1)
+    expect(infusion.rateBeforePause).toBeNull()
+    expect(infusion.stoppedAtMinute).toBeNull()
+    expect(useSimStore.getState().feedback).toMatchObject({ tone: 'success', title: 'Infusion restarted' })
+  })
+})
+
+describe('store — discontinue', () => {
+  it('removes the infusion and charts discontinuation in MAR', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    const id = norepiInfusion().id
+    useSimStore.getState().discontinueInfusion(id)
+    const state = useSimStore.getState()
+    expect(state.infusions.some((i) => i.id === id)).toBe(false)
+    const marEntry = state.log.find(
+      (e) => e.type === 'documentation' && e.location === 'MAR' && /Discontinuation/.test(e.summary),
+    )
+    expect(marEntry).toBeDefined()
+    expect(state.feedback).toMatchObject({ tone: 'info', title: 'Infusion discontinued' })
+  })
+
+  it('can discontinue a paused infusion too', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    useSimStore.getState().pauseInfusion(norepiInfusion().id)
+    const id = norepiInfusion().id
+    useSimStore.getState().discontinueInfusion(id)
+    expect(useSimStore.getState().infusions.some((i) => i.id === id)).toBe(false)
+  })
+})
+
+describe('store — 2-hour off rule', () => {
+  it('advanceClock warns once a paused infusion crosses 120 minutes stopped', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    useSimStore.getState().pauseInfusion(norepiInfusion().id)
+    useSimStore.getState().advanceClock(119)
+    expect(useSimStore.getState().feedback?.title).not.toBe('Infusion off for 2+ hours')
+    useSimStore.getState().advanceClock(1) // total 120
+    expect(useSimStore.getState().feedback).toMatchObject({ tone: 'danger', title: 'Infusion off for 2+ hours' })
+  })
+})
+
+describe('store — Block of Charting', () => {
+  beforeEach(() => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+  })
+
+  it('declareBlockOfCharting requires an infusing infusion for that order', () => {
+    useSimStore.getState().declareBlockOfCharting(VASOPRESSIN_ORDER_ID) // not infusing
+    expect(useSimStore.getState().activeBlockOfCharting).toBeNull()
+  })
+
+  it('declares a block and lets submitDose bypass interval/increment checks while active', () => {
+    useSimStore.getState().declareBlockOfCharting(NOREPI_ORDER_ID)
+    expect(useSimStore.getState().activeBlockOfCharting).toMatchObject({
+      orderId: NOREPI_ORDER_ID,
+      drugId: 'norepinephrine',
+      startMinute: 0,
+    })
+    // Off-order under normal rules: 0 min elapsed (needs 3) and a jump far past the 0.5 increment.
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 10)
+    expect(norepiInfusion().rate).toBe(10)
+    const entry = useSimStore.getState().log.find((e) => e.doseAction === 'titrate')!
+    expect(entry.outcome).toBe('applied')
+    expect(entry.underBlockOfCharting).toBe(true)
+  })
+
+  it('still blocks a dose above the Guardrails hard limit even under an active block', () => {
+    useSimStore.getState().declareBlockOfCharting(NOREPI_ORDER_ID)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 999)
+    expect(norepiInfusion().rate).toBe(0.5)
+    expect(useSimStore.getState().feedback).toMatchObject({ tone: 'danger', title: 'Blocked by Guardrails' })
+  })
+
+  it('closeBlockOfCharting records the episode in history', () => {
+    useSimStore.getState().declareBlockOfCharting(NOREPI_ORDER_ID)
+    useSimStore.getState().advanceClock(20)
+    useSimStore.getState().closeBlockOfCharting()
+    const state = useSimStore.getState()
+    expect(state.activeBlockOfCharting).toBeNull()
+    expect(state.blockOfChartingHistory).toHaveLength(1)
+    expect(state.blockOfChartingHistory[0]).toMatchObject({ orderId: NOREPI_ORDER_ID, startMinute: 0, endMinute: 20 })
+  })
+
+  it('advanceClock warns once an active block exceeds 4 hours', () => {
+    useSimStore.getState().declareBlockOfCharting(NOREPI_ORDER_ID)
+    useSimStore.getState().advanceClock(239)
+    expect(useSimStore.getState().feedback?.title).not.toBe('Block of Charting exceeds 4 hours')
+    useSimStore.getState().advanceClock(1) // total 240
+    expect(useSimStore.getState().feedback).toMatchObject({ tone: 'warning', title: 'Block of Charting exceeds 4 hours' })
   })
 })
 

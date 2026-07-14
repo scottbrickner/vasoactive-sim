@@ -10,7 +10,7 @@ export interface InfusionsPanelProps {
 const STATUS_LABEL: Record<InfusionStatus, string> = {
   hanging: 'Hanging',
   infusing: 'Infusing',
-  stopped: 'Stopped',
+  stopped: 'Paused',
 }
 
 const STATUS_COLOR: Record<InfusionStatus, string> = {

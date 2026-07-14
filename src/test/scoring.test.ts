@@ -110,6 +110,42 @@ describe('scoreSession — missed documentation', () => {
   })
 })
 
+describe('scoreSession — Block of Charting', () => {
+  beforeEach(() => {
+    const s = useSimStore.getState()
+    s.completeBeginBag(norepiInfusionId())
+    s.submitDose(NOREPI_ORDER_ID, 0.5)
+  })
+
+  it('is n/a when no block has ever been declared', () => {
+    expect(categoryStatus('blockOfCharting')).toBe('n/a')
+  })
+
+  it('is missed when the block is closed with no charting and no provider notification', () => {
+    useSimStore.getState().declareBlockOfCharting(NOREPI_ORDER_ID)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 10)
+    useSimStore.getState().closeBlockOfCharting()
+    expect(categoryStatus('blockOfCharting')).toBe('missed')
+  })
+
+  it('is met once parameters are charted during the block and the provider is notified', () => {
+    useSimStore.getState().declareBlockOfCharting(NOREPI_ORDER_ID)
+    useSimStore.getState().chartVitals()
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 10)
+    useSimStore.getState().notifyProvider(NOREPI_ORDER_ID, 'Rapid titration in effect')
+    useSimStore.getState().closeBlockOfCharting()
+    expect(categoryStatus('blockOfCharting')).toBe('met')
+  })
+
+  it('excludes block-of-charting dose entries from order adherence / interval-increment scoring', () => {
+    useSimStore.getState().declareBlockOfCharting(NOREPI_ORDER_ID)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 10) // would be off-order under normal rules
+    // Only the initiate (0.5, applied) counts toward adherence — the block titration is excluded.
+    expect(categoryStatus('adherence')).toBe('met')
+    expect(categoryStatus('intervalIncrement')).toBe('n/a')
+  })
+})
+
 describe('scoreSession — no activity at all', () => {
   it('reports n/a categories and a null overall percent', () => {
     const card = score()

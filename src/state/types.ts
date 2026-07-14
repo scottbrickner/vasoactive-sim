@@ -116,6 +116,10 @@ export interface Infusion {
   beginBagCompleted: boolean
   /** Sim minute of the last dose-changing action for this infusion (initiation counts); null before initiation. */
   lastActionMinute: number | null
+  /** Sim minute this infusion was paused; null unless status is 'stopped'. Derived-timer anchor for the 2-hour rules. */
+  stoppedAtMinute: number | null
+  /** The rate in effect immediately before pausing — RESTART_AFTER_PAUSE_RULE requires resuming here, not at order.startDose. Null unless status is 'stopped'. */
+  rateBeforePause: number | null
 }
 
 export interface VitalSigns {
@@ -177,6 +181,28 @@ export interface LogEntry {
   guardrailStatus?: GuardrailStatus
   /** True on the entry logged by notifyProvider — distinguishes it from Begin Bag/dose entries. */
   isProviderNotification?: boolean
+  /** The numeric dose value for a dose-entry action entry (mirrors what's embedded in `summary`, structured). */
+  dose?: number
+  /** Present on pause/restart/discontinue/Block-of-Charting action entries — distinguishes them from dose entries. */
+  lifecycleAction?: 'pause' | 'restart' | 'discontinue' | 'blockDeclared' | 'blockClosed'
+  /** True when this dose-entry action was taken under an active Block of Charting for the same order (CP 4-156's emergent free-titration pathway) — order-compliance checks are bypassed, so scoring must not count it as off-order. */
+  underBlockOfCharting?: boolean
+}
+
+/**
+ * An emergent "Block of Charting" episode (CP 4-156): the RN may titrate as needed
+ * without the usual order/interval/increment constraints. `startMinute`/`endMinute`
+ * plus the `log[]` are enough to derive all 7 required elements at scoring time
+ * (starting/ending/max rate come from the dose-entry log entries in this window) —
+ * deliberately minimal state, nothing duplicated that the log already carries.
+ */
+export interface BlockOfChartingRecord {
+  id: string
+  orderId: string
+  drugId: DrugId
+  startMinute: number
+  /** Null while the block is still active. */
+  endMinute: number | null
 }
 
 export interface Patient {
@@ -236,4 +262,8 @@ export interface SimState {
    * projected MAP. Null before the first titration.
    */
   lastPhysiologyUpdate: { minute: number; map: number } | null
+  /** The in-progress Block of Charting episode, if any (CP 4-156's emergent pathway). */
+  activeBlockOfCharting: BlockOfChartingRecord | null
+  /** Closed Block of Charting episodes this session, for debrief scoring. */
+  blockOfChartingHistory: BlockOfChartingRecord[]
 }
