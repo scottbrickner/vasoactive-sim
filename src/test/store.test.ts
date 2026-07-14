@@ -6,7 +6,7 @@ const NOREPI_ORDER_ID = 'order-norepinephrine-agent1'
 const VASOPRESSIN_ORDER_ID = 'order-vasopressin-agent2'
 
 beforeEach(() => {
-  useSimStore.getState().startScenario(DEFAULT_SCENARIO)
+  useSimStore.getState().startScenario(DEFAULT_SCENARIO, 'training')
   useSimStore.setState({ phase: 'sim' })
 })
 
@@ -51,11 +51,15 @@ describe('store — initiation', () => {
     expect(marEntry).toBeDefined()
   })
 
-  it('rejects an off-order starting dose without applying it', () => {
+  it('rejects an off-order starting dose without applying it (training-mode override, cancelled)', () => {
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 2)
+    // Training mode defers off-order attempts pending a learner decision — cancel it.
+    expect(useSimStore.getState().pendingOverride).toMatchObject({ orderId: NOREPI_ORDER_ID, dose: 2, action: 'initiate' })
+    useSimStore.getState().cancelDoseOverride()
     const state = useSimStore.getState()
     expect(norepiInfusion().status).toBe('hanging')
     expect(norepiInfusion().rate).toBe(0)
+    expect(state.pendingOverride).toBeNull()
     expect(state.feedback?.tone).toBe('warning')
     expect(state.feedback?.title).toBe('Off-order — not applied')
   })
@@ -75,15 +79,19 @@ describe('store — titration mechanics', () => {
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
   })
 
-  it('rejects titrating sooner than the minimum interval', () => {
+  it('rejects titrating sooner than the minimum interval (training-mode override, cancelled)', () => {
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // 0 minutes elapsed; needs 3
+    expect(useSimStore.getState().pendingOverride?.violations.intervalTooSoon).toBe(true)
+    useSimStore.getState().cancelDoseOverride()
     expect(norepiInfusion().rate).toBe(0.5)
     expect(useSimStore.getState().feedback?.title).toBe('Off-order — not applied')
   })
 
-  it('rejects an incorrect increment', () => {
+  it('rejects an incorrect increment (training-mode override, cancelled)', () => {
     useSimStore.getState().advanceClock(3)
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 2) // delta 1.5, ordered increment 0.5
+    expect(useSimStore.getState().pendingOverride?.violations.wrongIncrement).toBe(true)
+    useSimStore.getState().cancelDoseOverride()
     expect(norepiInfusion().rate).toBe(0.5)
     expect(useSimStore.getState().feedback?.title).toBe('Off-order — not applied')
   })
@@ -102,6 +110,109 @@ describe('store — titration mechanics', () => {
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 999)
     expect(norepiInfusion().rate).toBe(0.5)
     expect(useSimStore.getState().feedback).toMatchObject({ tone: 'danger', title: 'Blocked by Guardrails' })
+  })
+})
+
+describe('store — auto-advance by order interval', () => {
+  it('a successfully applied titrate auto-advances the clock by the order interval', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0 — no auto-advance
+    expect(useSimStore.getState().clockMinutes).toBe(0)
+    useSimStore.getState().advanceClock(3) // manual, t=3
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // titrate — norepi's interval is 3 min
+    expect(useSimStore.getState().clockMinutes).toBe(6)
+  })
+
+  it('does not auto-advance when a titrate is rejected (Guardrails hard limit)', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    useSimStore.getState().advanceClock(3)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 999)
+    expect(useSimStore.getState().clockMinutes).toBe(3)
+  })
+
+  it('does not auto-advance a deferred training-mode override that is cancelled', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon — deferred
+    expect(useSimStore.getState().clockMinutes).toBe(0)
+    useSimStore.getState().cancelDoseOverride()
+    expect(useSimStore.getState().clockMinutes).toBe(0)
+  })
+
+  it('auto-advances once a deferred training-mode override is confirmed', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon — deferred
+    useSimStore.getState().confirmDoseOverride()
+    expect(useSimStore.getState().clockMinutes).toBe(3)
+  })
+})
+
+describe('store — training/validation mode override flow', () => {
+  beforeEach(() => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0
+  })
+
+  it('training mode defers an off-order titration, leaving the infusion untouched', () => {
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon
+    const state = useSimStore.getState()
+    expect(state.pendingOverride).not.toBeNull()
+    expect(norepiInfusion().rate).toBe(0.5)
+    expect(state.log.some((e) => e.dose === 1)).toBe(false) // deferred — not logged yet
+  })
+
+  it('confirmDoseOverride applies the dose and logs it as overridden, excluded from adherence', () => {
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon
+    useSimStore.getState().confirmDoseOverride()
+    const state = useSimStore.getState()
+    expect(norepiInfusion().rate).toBe(1)
+    expect(state.pendingOverride).toBeNull()
+    const entry = state.log.find((e) => e.dose === 1)!
+    expect(entry.outcome).toBe('applied')
+    expect(entry.overridden).toBe(true)
+    expect(state.adherenceFlags[entry.id]).toBe(false)
+    expect(state.feedback).toMatchObject({ tone: 'warning', title: 'Applied via override' })
+  })
+
+  it('cancelDoseOverride logs the attempt as off-order without applying it', () => {
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon
+    useSimStore.getState().cancelDoseOverride()
+    const state = useSimStore.getState()
+    expect(norepiInfusion().rate).toBe(0.5)
+    const entry = state.log.find((e) => e.dose === 1)!
+    expect(entry.outcome).toBe('off-order')
+    expect(entry.overridden).toBeUndefined()
+  })
+
+  it('validation mode applies an off-order titration silently, scored as overridden', () => {
+    useSimStore.setState({ mode: 'validation' })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon
+    const state = useSimStore.getState()
+    expect(state.pendingOverride).toBeNull()
+    expect(norepiInfusion().rate).toBe(1)
+    const entry = state.log.find((e) => e.dose === 1)!
+    expect(entry.outcome).toBe('applied')
+    expect(entry.overridden).toBe(true)
+    expect(state.adherenceFlags[entry.id]).toBe(false)
+    expect(state.feedback).toMatchObject({ tone: 'success', title: 'Titration applied' })
+  })
+
+  it('needs-provider is a hard stop in both modes, never deferred', () => {
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 25, lastActionMinute: 0 } : i)),
+      orders: s.orders.map((o) => (o.id === NOREPI_ORDER_ID ? { ...o, maxDose: 25 } : o)),
+      clockMinutes: 3,
+    }))
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 26)
+    expect(useSimStore.getState().pendingOverride).toBeNull()
+    expect(useSimStore.getState().feedback).toMatchObject({ tone: 'warning', title: 'Notify the provider' })
+
+    useSimStore.setState({ mode: 'validation', clockMinutes: 6 })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 26)
+    expect(useSimStore.getState().pendingOverride).toBeNull()
+    expect(useSimStore.getState().feedback).toMatchObject({ tone: 'danger', title: 'Not accepted' })
   })
 })
 
@@ -148,8 +259,10 @@ describe('store — max dose and provider notification', () => {
 })
 
 describe('store — multi-agent sequence (vasopressin)', () => {
-  it('blocks initiating agent 2 before agent 1 is maxed with target unmet', () => {
+  it('blocks initiating agent 2 before agent 1 has reached its activation threshold with target unmet', () => {
     useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.02)
+    expect(useSimStore.getState().pendingOverride?.violations.sequenceNotActivated).toBe(true)
+    useSimStore.getState().cancelDoseOverride()
     const state = useSimStore.getState()
     expect(state.infusions.some((i) => i.drugId === 'vasopressin')).toBe(false)
     expect(state.feedback?.title).toBe('Off-order — not applied')
@@ -167,6 +280,30 @@ describe('store — multi-agent sequence (vasopressin)', () => {
     const vaso = state.infusions.find((i) => i.drugId === 'vasopressin')
     expect(vaso).toMatchObject({ status: 'infusing', rate: 0.02, beginBagCompleted: true, channel: 'B' })
     expect(state.feedback).toMatchObject({ tone: 'success', title: 'Infusion started' })
+  })
+
+  it('activates agent 2 at 1/3 of norepi max (10 mcg/min), not only at its full max', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 10, lastActionMinute: 30 } : i)),
+    }))
+
+    useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.02)
+    const state = useSimStore.getState()
+    expect(state.infusions.some((i) => i.drugId === 'vasopressin')).toBe(true)
+    expect(state.feedback).toMatchObject({ tone: 'success', title: 'Infusion started' })
+  })
+
+  it('does not activate agent 2 just below 1/3 of norepi max (9 mcg/min)', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 9, lastActionMinute: 30 } : i)),
+    }))
+
+    useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.02)
+    expect(useSimStore.getState().pendingOverride?.violations.sequenceNotActivated).toBe(true)
   })
 })
 

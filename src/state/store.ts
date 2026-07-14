@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { deriveActivationText } from '../engine/activation'
 import { advance, minutesElapsed } from '../engine/clock'
 import { correctLocationFor } from '../engine/documentation'
 import { evaluateDose, limitsFromOrder } from '../engine/guardrails'
@@ -7,7 +8,18 @@ import { projectDoseResponse, projectMap, responseFraction, stepTowardTarget } f
 import { evaluateTitration, type TitrationAction, type TitrationResult } from '../engine/titrationEngine'
 import { getDrug } from '../data/formulary'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
-import type { BlockOfChartingRecord, Infusion, LogEntry, Order, Phase, ScenarioConfig } from './types'
+import type {
+  BlockOfChartingRecord,
+  DrugDefinition,
+  GuardrailStatus,
+  Infusion,
+  LogEntry,
+  Order,
+  Phase,
+  ScenarioConfig,
+  SimMode,
+  TitrationViolations,
+} from './types'
 
 export type FeedbackTone = 'info' | 'success' | 'warning' | 'danger'
 
@@ -31,7 +43,11 @@ function contributionFor(infusion: Infusion, scenario: ScenarioConfig): number {
   return projectDoseResponse(infusion.rate, drug.maxDose, model.maxMapContribution)
 }
 
-/** Sequence > 1 orders activate once every lower-sequence order's infusion is at its own max with target unmet. */
+/**
+ * Sequence > 1 orders activate once every lower-sequence order's infusion is at (or
+ * past) `order.activationThreshold` of its own max — defaults to 1 ("at its own max")
+ * when omitted — with target still unmet.
+ */
 export function priorAgentsActivationMet(
   infusions: Infusion[],
   orders: Order[],
@@ -40,12 +56,14 @@ export function priorAgentsActivationMet(
 ): boolean {
   const priorOrders = orders.filter((o) => o.sequence < order.sequence)
   if (priorOrders.length === 0) return true
+  const fraction = order.activationThreshold ?? 1
   return priorOrders.every((priorOrder) => {
     const infusion = infusions.find((i) => i.orderId === priorOrder.id)
     if (!infusion) return false
-    const atMax = infusion.rate >= priorOrder.maxDose - 1e-9
+    const thresholdDose = priorOrder.maxDose * fraction
+    const atThreshold = infusion.rate >= thresholdDose - 1e-9
     const targetUnmet = currentMap < priorOrder.target.value
-    return atMax && targetUnmet
+    return atThreshold && targetUnmet
   })
 }
 
@@ -57,8 +75,90 @@ function nextChannelLetter(infusions: Infusion[]): string {
   return 'X'
 }
 
+/**
+ * A deferred off-order attempt, awaiting the training-mode learner's confirm/cancel
+ * decision (see submitDose). Not part of SimState — purely transient UI-adjacent store
+ * state, like FeedbackMessage.
+ */
+export interface PendingOverride {
+  orderId: string
+  dose: number
+  action: TitrationAction
+  reasons: string[]
+  violations: TitrationViolations
+  guardrailStatus: GuardrailStatus
+}
+
+interface ApplyStateSlice {
+  clockMinutes: number
+  infusions: Infusion[]
+  log: LogEntry[]
+  vitals: ScenarioConfig['startingVitals']
+}
+
+/**
+ * Shared "apply this dose to the infusion" logic — used by both a clean order-compliant
+ * apply and an overridden/silently-applied one, so the two paths can't drift apart.
+ */
+function computeApplyUpdate(
+  s: ApplyStateSlice,
+  order: Order,
+  drug: DrugDefinition,
+  infusion: Infusion | null,
+  action: TitrationAction,
+  dose: number,
+): Pick<ApplyStateSlice, 'infusions' | 'log'> & { lastPhysiologyUpdate: { minute: number; map: number } } {
+  const nextInfusion: Infusion = infusion
+    ? {
+        ...infusion,
+        status: 'infusing',
+        rate: dose,
+        // The MAR's initial-rate record is fixed at initiation — later titrations
+        // chart in iView instead (see data/policy.ts DOCUMENTATION_PLACEMENT) and
+        // must never overwrite it.
+        initialRate: action === 'initiate' ? dose : infusion.initialRate,
+        lastActionMinute: s.clockMinutes,
+      }
+    : {
+        id: nextId('infusion'),
+        orderId: order.id,
+        drugId: order.drugId,
+        status: 'infusing',
+        rate: dose,
+        initialRate: dose,
+        channel: nextChannelLetter(s.infusions),
+        beginBagCompleted: true,
+        lastActionMinute: s.clockMinutes,
+        stoppedAtMinute: null,
+        rateBeforePause: null,
+      }
+  const infusions = infusion
+    ? s.infusions.map((i) => (i.id === nextInfusion.id ? nextInfusion : i))
+    : [...s.infusions, nextInfusion]
+
+  const marEntry: LogEntry[] =
+    action === 'initiate'
+      ? [
+          {
+            id: nextId('log'),
+            minute: s.clockMinutes,
+            type: 'documentation',
+            location: correctLocationFor('initialRate'),
+            summary: `Initial rate charted in MAR: ${drug.name} ${dose} ${drug.unit}.`,
+          },
+        ]
+      : []
+
+  return {
+    infusions,
+    log: [...s.log, ...marEntry],
+    lastPhysiologyUpdate: { minute: s.clockMinutes, map: s.vitals.map },
+  }
+}
+
 interface SimStore {
   phase: Phase
+  mode: SimMode
   scenario: ScenarioConfig
   clockMinutes: number
   infusions: Infusion[]
@@ -70,16 +170,22 @@ interface SimStore {
   lastPhysiologyUpdate: { minute: number; map: number } | null
   activeBlockOfCharting: BlockOfChartingRecord | null
   blockOfChartingHistory: BlockOfChartingRecord[]
+  /** A deferred off-order dose attempt awaiting the training-mode learner's decision. */
+  pendingOverride: PendingOverride | null
   feedback: FeedbackMessage | null
 
   setPhase: (phase: Phase) => void
   /** (Re)initializes the live sim state from a scenario config — used by both "Begin simulation" and "Restart simulation". */
-  startScenario: (scenario: ScenarioConfig) => void
+  startScenario: (scenario: ScenarioConfig, mode: SimMode) => void
   dismissFeedback: () => void
 
   completeBeginBag: (infusionId: string) => void
   /** Handles both initiation (no/hanging infusion) and titration (infusing), keyed by order. */
   submitDose: (orderId: string, dose: number) => void
+  /** Applies a pending training-mode override: logs it as 'applied'/overridden and mutates the infusion. */
+  confirmDoseOverride: () => void
+  /** Rejects a pending training-mode override: logs it as 'off-order', infusion untouched. */
+  cancelDoseOverride: () => void
   notifyProvider: (orderId: string, reason?: string) => void
   chartVitals: () => void
   advanceClock: (byMinutes: number) => void
@@ -95,30 +201,32 @@ interface SimStore {
   closeBlockOfCharting: () => void
 }
 
-function initialSimFields(scenario: ScenarioConfig) {
+function initialSimFields(scenario: ScenarioConfig, mode: SimMode) {
   return {
+    mode,
     scenario,
     clockMinutes: 0,
     infusions: [{ ...scenario.initialInfusion }],
     vitals: { ...scenario.startingVitals },
-    orders: scenario.orders.map((o) => ({ ...o })),
+    orders: scenario.orders.map((o) => ({ ...o, activatesWhen: deriveActivationText(o, scenario.orders) })),
     log: [] as LogEntry[],
     verificationFlags: {} as Record<string, boolean>,
     adherenceFlags: {} as Record<string, boolean>,
     lastPhysiologyUpdate: null as { minute: number; map: number } | null,
     activeBlockOfCharting: null as BlockOfChartingRecord | null,
     blockOfChartingHistory: [] as BlockOfChartingRecord[],
+    pendingOverride: null as PendingOverride | null,
     feedback: null as FeedbackMessage | null,
   }
 }
 
 export const useSimStore = create<SimStore>((set, get) => ({
   phase: 'intro' as Phase,
-  ...initialSimFields(DEFAULT_SCENARIO),
+  ...initialSimFields(DEFAULT_SCENARIO, 'training'),
 
   setPhase: (phase) => set({ phase }),
 
-  startScenario: (nextScenario) => set(initialSimFields(nextScenario)),
+  startScenario: (nextScenario, mode) => set(initialSimFields(nextScenario, mode)),
 
   dismissFeedback: () => set({ feedback: null }),
 
@@ -213,40 +321,64 @@ export const useSimStore = create<SimStore>((set, get) => ({
             order.sequence === 1 || priorAgentsActivationMet(state.infusions, state.orders, state.vitals.map, order),
         })
 
-    const applied = guardEval.status !== 'hardLimitBlocked' && result.status === 'ok'
-    // result.status is 'ok' only when applied is true (see the `applied` check above), so
-    // the else-else branch below never actually sees 'ok' — the cast reflects that.
-    const outcome = (
-      applied ? 'applied' : guardEval.status === 'hardLimitBlocked' ? 'hardLimitBlocked' : result.status
-    ) as 'applied' | 'off-order' | 'needs-provider' | 'hardLimitBlocked'
-
-    const entry: LogEntry = {
-      id: nextId('log'),
-      minute: state.clockMinutes,
-      type: 'action',
-      summary: `${action === 'initiate' ? 'Initiate' : 'Titrate'} ${drug.name} to ${dose} ${drug.unit} — ${outcome}${blockActive ? ' (Block of Charting)' : ''}.`,
-      orderId: order.id,
-      drugId: order.drugId,
-      doseAction: action,
-      dose,
-      outcome,
-      violations: result.violations,
-      guardrailStatus: guardEval.status,
-      underBlockOfCharting: blockActive || undefined,
-    }
-
-    set((s) => ({
-      log: [...s.log, entry],
-      verificationFlags: { ...s.verificationFlags, [entry.id]: true },
-      adherenceFlags: { ...s.adherenceFlags, [entry.id]: result.status === 'ok' },
-    }))
-
     // Guardrails hard limit is an absolute pump ceiling — it wins over everything else,
     // including needs-provider, because the pump would mechanically refuse the dose no
     // matter how clinically justified the request is. needs-provider is only reachable
     // in the band between the order's own max and the drug's (potentially higher) hard
     // ceiling — e.g. a prescriber-customized order max below Attachment B's default.
-    if (guardEval.status === 'hardLimitBlocked') {
+    const outcome = (
+      guardEval.status === 'hardLimitBlocked' ? 'hardLimitBlocked' : result.status === 'ok' ? 'applied' : result.status
+    ) as 'applied' | 'off-order' | 'needs-provider' | 'hardLimitBlocked'
+
+    // Off-order in training mode needs a learner decision before the outcome is final —
+    // deferred here rather than logged-then-patched, since a written LogEntry is never
+    // mutated elsewhere in this codebase (faithful audit trail).
+    if (outcome === 'off-order' && state.mode === 'training') {
+      set({
+        pendingOverride: {
+          orderId,
+          dose,
+          action,
+          reasons: result.reasons,
+          violations: result.violations,
+          guardrailStatus: guardEval.status,
+        },
+      })
+      return
+    }
+
+    // Validation mode applies an off-order dose silently — a real Alaris pump doesn't
+    // know the written order, only its own Guardrails limits — and scores it at debrief
+    // via `overridden` + adherenceFlags rather than blocking it live.
+    const overridden = outcome === 'off-order' ? true : undefined
+    const finalOutcome = overridden ? 'applied' : outcome
+
+    const entry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `${action === 'initiate' ? 'Initiate' : 'Titrate'} ${drug.name} to ${dose} ${drug.unit} — ${finalOutcome}${blockActive ? ' (Block of Charting)' : ''}.`,
+      orderId: order.id,
+      drugId: order.drugId,
+      doseAction: action,
+      dose,
+      outcome: finalOutcome,
+      violations: result.violations,
+      guardrailStatus: guardEval.status,
+      underBlockOfCharting: blockActive || undefined,
+      overridden,
+    }
+
+    // BCMA/I-TRACE verification only runs at Begin Bag / initiation (see Simulation.tsx's
+    // narrowed PendingAction) — titrations are ungated, so only initiate entries are
+    // "verifiable" at all (scoring.ts category 4 keys off key presence, not just value).
+    set((s) => ({
+      log: [...s.log, entry],
+      verificationFlags: action === 'initiate' ? { ...s.verificationFlags, [entry.id]: true } : s.verificationFlags,
+      adherenceFlags: { ...s.adherenceFlags, [entry.id]: result.status === 'ok' },
+    }))
+
+    if (finalOutcome === 'hardLimitBlocked') {
       set({
         feedback: {
           tone: 'danger',
@@ -257,65 +389,19 @@ export const useSimStore = create<SimStore>((set, get) => ({
       return
     }
 
-    if (result.status === 'needs-provider') {
-      set({ feedback: { tone: 'warning', title: 'Notify the provider', message: result.reasons.join(' ') } })
+    if (finalOutcome === 'needs-provider') {
+      set({
+        feedback:
+          state.mode === 'training'
+            ? { tone: 'warning', title: 'Notify the provider', message: result.reasons.join(' ') }
+            : { tone: 'danger', title: 'Not accepted', message: 'This dose was not accepted. Reassess and try again.' },
+      })
       return
     }
 
-    if (result.status === 'off-order') {
-      set({ feedback: { tone: 'warning', title: 'Off-order — not applied', message: result.reasons.join(' ') } })
-      return
-    }
-
-    // status === 'ok' — apply
-    set((s) => {
-      const nextInfusion: Infusion = infusion
-        ? {
-            ...infusion,
-            status: 'infusing',
-            rate: dose,
-            // The MAR's initial-rate record is fixed at initiation — later titrations
-            // chart in iView instead (see data/policy.ts DOCUMENTATION_PLACEMENT) and
-            // must never overwrite it.
-            initialRate: action === 'initiate' ? dose : infusion.initialRate,
-            lastActionMinute: s.clockMinutes,
-          }
-        : {
-            id: nextId('infusion'),
-            orderId: order.id,
-            drugId: order.drugId,
-            status: 'infusing',
-            rate: dose,
-            initialRate: dose,
-            channel: nextChannelLetter(s.infusions),
-            beginBagCompleted: true,
-            lastActionMinute: s.clockMinutes,
-            stoppedAtMinute: null,
-            rateBeforePause: null,
-          }
-      const infusions = infusion
-        ? s.infusions.map((i) => (i.id === nextInfusion.id ? nextInfusion : i))
-        : [...s.infusions, nextInfusion]
-
-      const marEntry: LogEntry[] =
-        action === 'initiate'
-          ? [
-              {
-                id: nextId('log'),
-                minute: s.clockMinutes,
-                type: 'documentation',
-                location: correctLocationFor('initialRate'),
-                summary: `Initial rate charted in MAR: ${drug.name} ${dose} ${drug.unit}.`,
-              },
-            ]
-          : []
-
-      return {
-        infusions,
-        log: [...s.log, ...marEntry],
-        lastPhysiologyUpdate: { minute: s.clockMinutes, map: s.vitals.map },
-      }
-    })
+    // finalOutcome === 'applied' — a clean order-compliant dose, or a validation-mode
+    // silent override (see `overridden` above).
+    set((s) => computeApplyUpdate(s, order, drug, infusion, action, dose))
 
     set({
       feedback: {
@@ -324,6 +410,90 @@ export const useSimStore = create<SimStore>((set, get) => ({
         message: `${drug.name} now at ${dose} ${drug.unit}.`,
       },
     })
+
+    // Titrating implies time has passed for reassessment; initiating is the start of
+    // observation, not itself an interval. A facilitator-driven-vs-auto pacing toggle
+    // is planned for Phase 10 — auto is the only mode until then.
+    if (action === 'titrate') get().advanceClock(order.interval.minMinutes)
+  },
+
+  confirmDoseOverride: () => {
+    const state = get()
+    const pending = state.pendingOverride
+    if (!pending) return
+    const order = state.orders.find((o) => o.id === pending.orderId)
+    if (!order) {
+      set({ pendingOverride: null })
+      return
+    }
+    const drug = getDrug(order.drugId)
+    const infusion = state.infusions.find((i) => i.orderId === pending.orderId) ?? null
+
+    const entry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `${pending.action === 'initiate' ? 'Initiate' : 'Titrate'} ${drug.name} to ${pending.dose} ${drug.unit} — applied via override.`,
+      orderId: order.id,
+      drugId: order.drugId,
+      doseAction: pending.action,
+      dose: pending.dose,
+      outcome: 'applied',
+      violations: pending.violations,
+      guardrailStatus: pending.guardrailStatus,
+      overridden: true,
+    }
+
+    set((s) => ({
+      log: [...s.log, entry],
+      verificationFlags: pending.action === 'initiate' ? { ...s.verificationFlags, [entry.id]: true } : s.verificationFlags,
+      adherenceFlags: { ...s.adherenceFlags, [entry.id]: false },
+      pendingOverride: null,
+    }))
+
+    set((s) => computeApplyUpdate(s, order, drug, infusion, pending.action, pending.dose))
+
+    set({
+      feedback: {
+        tone: 'warning',
+        title: 'Applied via override',
+        message: `${drug.name} now at ${pending.dose} ${drug.unit} — logged as an override for debrief.`,
+      },
+    })
+
+    if (pending.action === 'titrate') get().advanceClock(order.interval.minMinutes)
+  },
+
+  cancelDoseOverride: () => {
+    const state = get()
+    const pending = state.pendingOverride
+    if (!pending) return
+    const order = state.orders.find((o) => o.id === pending.orderId)
+    const drug = order ? getDrug(order.drugId) : null
+    const entry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `${pending.action === 'initiate' ? 'Initiate' : 'Titrate'} ${drug?.name ?? ''} to ${pending.dose} ${drug?.unit ?? ''} — off-order.`,
+      orderId: pending.orderId,
+      drugId: order?.drugId,
+      doseAction: pending.action,
+      dose: pending.dose,
+      outcome: 'off-order',
+      violations: pending.violations,
+      guardrailStatus: pending.guardrailStatus,
+    }
+    set((s) => ({
+      log: [...s.log, entry],
+      verificationFlags: pending.action === 'initiate' ? { ...s.verificationFlags, [entry.id]: true } : s.verificationFlags,
+      adherenceFlags: { ...s.adherenceFlags, [entry.id]: false },
+      pendingOverride: null,
+      feedback: {
+        tone: 'warning',
+        title: 'Off-order — not applied',
+        message: pending.reasons.join(' '),
+      },
+    }))
   },
 
   notifyProvider: (orderId, reason) => {
@@ -455,6 +625,10 @@ export const useSimStore = create<SimStore>((set, get) => ({
       dose: rate,
       lifecycleAction: 'restart',
     }
+    // Restart is ungated (no VerificationPanel — see Simulation.tsx's narrowed
+    // PendingAction), so unlike Begin Bag/initiate it doesn't set verificationFlags at
+    // all: no BCMA/I-TRACE check actually ran, and scoring.ts category 4 keys off key
+    // presence in that record, not just its value.
     set((s) => ({
       infusions: s.infusions.map((i) =>
         i.id === infusionId
@@ -462,7 +636,6 @@ export const useSimStore = create<SimStore>((set, get) => ({
           : i,
       ),
       log: [...s.log, entry],
-      verificationFlags: { ...s.verificationFlags, [entry.id]: true },
       adherenceFlags: { ...s.adherenceFlags, [entry.id]: true },
       lastPhysiologyUpdate: { minute: s.clockMinutes, map: s.vitals.map },
       feedback: {
@@ -496,10 +669,10 @@ export const useSimStore = create<SimStore>((set, get) => ({
       orderId: infusion.orderId,
       drugId: infusion.drugId,
     }
+    // Discontinue is ungated too (see restartInfusion's comment above) — no verificationFlags entry.
     set((s) => ({
       infusions: s.infusions.filter((i) => i.id !== infusionId),
       log: [...s.log, actionEntry, marEntry],
-      verificationFlags: { ...s.verificationFlags, [actionEntry.id]: true },
       adherenceFlags: { ...s.adherenceFlags, [actionEntry.id]: true },
       feedback: {
         tone: 'info',

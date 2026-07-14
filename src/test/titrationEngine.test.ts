@@ -1,10 +1,20 @@
 import { describe, expect, it } from 'vitest'
+import { deriveActivationText } from '../engine/activation'
 import { evaluateTitration } from '../engine/titrationEngine'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
 import type { Order } from '../state/types'
 
 const norepiOrder = DEFAULT_SCENARIO.orders.find((o) => o.drugId === 'norepinephrine')!
-const vasopressinOrder = DEFAULT_SCENARIO.orders.find((o) => o.drugId === 'vasopressin')!
+// `activatesWhen` isn't baked into the raw scenario data anymore — store.ts derives it at
+// init time (see engine/activation.ts) — so populate it here the same way, matching what
+// evaluateTitration actually receives at runtime.
+const vasopressinOrder: Order = {
+  ...DEFAULT_SCENARIO.orders.find((o) => o.drugId === 'vasopressin')!,
+  activatesWhen: deriveActivationText(
+    DEFAULT_SCENARIO.orders.find((o) => o.drugId === 'vasopressin')!,
+    DEFAULT_SCENARIO.orders,
+  ),
+}
 
 const belowTargetMap = 57 // scenario baseline; target is MAP >= 65
 const atTargetMap = 65

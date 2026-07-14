@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SCENARIO, SCENARIOS } from '../data/scenarios'
 import { FORMULARY } from '../data/formulary'
+import { deriveActivationText } from '../engine/activation'
 
 describe('first scenario — neutropenic septic shock', () => {
   it('is registered and set as the default', () => {
@@ -31,11 +32,17 @@ describe('first scenario — neutropenic septic shock', () => {
     expect(order.target).toEqual({ metric: 'MAP', comparator: '>=', value: 65, unit: 'mmHg' })
   })
 
-  it('orders agent 2 (vasopressin) to activate only once agent 1 is maxed and MAP is still low', () => {
+  it('orders agent 2 (vasopressin) to activate at 1/3 of norepi max with MAP still low', () => {
     const order = DEFAULT_SCENARIO.orders.find((o) => o.sequence === 2)!
     expect(order.drugId).toBe('vasopressin')
-    expect(order.activatesWhen).toMatch(/norepinephrine/i)
-    expect(order.activatesWhen).toMatch(/30 mcg\/min/)
+    expect(order.activationThreshold).toBeCloseTo(1 / 3)
+    // `activatesWhen` is no longer hand-authored on the scenario itself — store.ts derives
+    // it at init time (see engine/activation.ts) so display text can't drift from the
+    // real threshold used by priorAgentsActivationMet.
+    const activatesWhen = deriveActivationText(order, DEFAULT_SCENARIO.orders)
+    expect(activatesWhen).toMatch(/norepinephrine/i)
+    expect(activatesWhen).toMatch(/10 mcg\/min/)
+    expect(activatesWhen).toMatch(/33%/)
   })
 
   it('the initial infusion references a real order in the scenario', () => {

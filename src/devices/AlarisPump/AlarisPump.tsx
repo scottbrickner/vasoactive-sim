@@ -4,6 +4,14 @@ import { Button } from '../../design/primitives'
 import { isPastRemovalThreshold, minutesStopped } from '../../engine/infusionLifecycle'
 import type { DrugDefinition, Infusion, Order } from '../../state/types'
 
+/**
+ * Ghost-style device buttons (Pause/Discontinue) on the dark chassis — the shell
+ * Button's `ghost` variant is `text-cardinal` on transparent, tuned for the light shell
+ * background, and was illegible here (WCAG AA contrast failure). Inline `style` wins
+ * over the variant's utility classes regardless of Tailwind's generated CSS order.
+ */
+const DEVICE_GHOST_STYLE = { color: alaris.lcd, borderColor: alaris.lcdMuted } as const
+
 export interface PumpChannelInfo {
   channel: string
   order: Order
@@ -17,11 +25,16 @@ export interface PumpChannelInfo {
 export interface AlarisPumpProps {
   channels: PumpChannelInfo[]
   clockMinutes: number
+  /** Initiating a new infusion — gated by VerificationPanel upstream (Simulation.tsx). */
   onRequestProgram: (orderId: string, dose: number) => void
+  /** Titrating an already-infusing order — direct/ungated, like onPause (see CLAUDE.md's narrowed verification scope). */
+  onTitrate: (orderId: string, dose: number) => void
   /** Stops the infusion. Not verification-gated — no drug identity/dose is administered by pausing. */
   onPause: (infusionId: string) => void
-  onRequestRestart: (infusionId: string) => void
-  onRequestDiscontinue: (infusionId: string) => void
+  /** Resumes at the rate in effect before the pause. Direct/ungated. */
+  onRestart: (infusionId: string) => void
+  /** Removes the infusion from the pump. Direct/ungated. */
+  onDiscontinue: (infusionId: string) => void
   /** True while a verification confirmation is pending elsewhere on the page. */
   disabled?: boolean
 }
@@ -30,15 +43,17 @@ export interface AlarisPumpProps {
  * Faithful (not stylized) replica of an Alaris Model 8015 / Guardrails Suite MX channel
  * screen. The learner enters their OWN dose (CLINICAL_SPEC.md #6 — free-choice dosing;
  * the sim never pre-fills or hints the correct value) and requests programming; the
- * actual Guardrails/order evaluation happens in the store after the verification gate.
+ * actual Guardrails/order evaluation happens in the store after the verification gate
+ * (initiation only — titration/restart/discontinue are direct).
  */
 export function AlarisPump({
   channels,
   clockMinutes,
   onRequestProgram,
+  onTitrate,
   onPause,
-  onRequestRestart,
-  onRequestDiscontinue,
+  onRestart,
+  onDiscontinue,
   disabled,
 }: AlarisPumpProps) {
   return (
@@ -49,9 +64,10 @@ export function AlarisPump({
           info={info}
           clockMinutes={clockMinutes}
           onRequestProgram={onRequestProgram}
+          onTitrate={onTitrate}
           onPause={onPause}
-          onRequestRestart={onRequestRestart}
-          onRequestDiscontinue={onRequestDiscontinue}
+          onRestart={onRestart}
+          onDiscontinue={onDiscontinue}
           disabled={disabled}
         />
       ))}
@@ -77,9 +93,10 @@ interface PumpChannelProps {
   info: PumpChannelInfo
   clockMinutes: number
   onRequestProgram: (orderId: string, dose: number) => void
+  onTitrate: (orderId: string, dose: number) => void
   onPause: (infusionId: string) => void
-  onRequestRestart: (infusionId: string) => void
-  onRequestDiscontinue: (infusionId: string) => void
+  onRestart: (infusionId: string) => void
+  onDiscontinue: (infusionId: string) => void
   disabled?: boolean
 }
 
@@ -87,9 +104,10 @@ function PumpChannel({
   info,
   clockMinutes,
   onRequestProgram,
+  onTitrate,
   onPause,
-  onRequestRestart,
-  onRequestDiscontinue,
+  onRestart,
+  onDiscontinue,
   disabled,
 }: PumpChannelProps) {
   const { order, drug, infusion, isActivated } = info
@@ -148,10 +166,10 @@ function PumpChannel({
 
       {paused && infusion ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button size="sm" disabled={disabled} onClick={() => onRequestRestart(infusion.id)}>
+          <Button size="sm" disabled={disabled} onClick={() => onRestart(infusion.id)}>
             Restart at {infusion.rateBeforePause} {drug.unit}
           </Button>
-          <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onRequestDiscontinue(infusion.id)}>
+          <Button size="sm" variant="ghost" className="border" style={DEVICE_GHOST_STYLE} disabled={disabled} onClick={() => onDiscontinue(infusion.id)}>
             Discontinue
           </Button>
         </div>
@@ -176,19 +194,23 @@ function PumpChannel({
             size="sm"
             disabled={!canProgram || !isValidNumber}
             onClick={() => {
-              onRequestProgram(order.id, parsed)
+              if (infusion?.status === 'infusing') {
+                onTitrate(order.id, parsed)
+              } else {
+                onRequestProgram(order.id, parsed)
+              }
               setDoseInput('')
             }}
           >
             {infusion?.status === 'infusing' ? 'Titrate' : 'Program'}
           </Button>
           {infusion?.status === 'infusing' && (
-            <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onPause(infusion.id)}>
+            <Button size="sm" variant="ghost" className="border" style={DEVICE_GHOST_STYLE} disabled={disabled} onClick={() => onPause(infusion.id)}>
               Pause
             </Button>
           )}
           {infusion && (
-            <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onRequestDiscontinue(infusion.id)}>
+            <Button size="sm" variant="ghost" className="border" style={DEVICE_GHOST_STYLE} disabled={disabled} onClick={() => onDiscontinue(infusion.id)}>
               Discontinue
             </Button>
           )}

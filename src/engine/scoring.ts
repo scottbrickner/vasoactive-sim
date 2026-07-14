@@ -52,7 +52,7 @@ function hasOwn(record: Record<string, boolean>, id: string): boolean {
 }
 
 export function scoreSession(input: ScoringInput): Scorecard {
-  const { orders, log, verificationFlags, blockOfChartingHistory } = input
+  const { orders, log, verificationFlags, adherenceFlags, blockOfChartingHistory } = input
   const doseEntries = log.filter((e) => e.type === 'action' && e.doseAction != null)
   // Order-compliance is deliberately bypassed under an active Block of Charting (CP
   // 4-156's emergent pathway — see store.ts's submitDose) — those entries were never
@@ -61,9 +61,13 @@ export function scoreSession(input: ScoringInput): Scorecard {
   const normalDoseEntries = doseEntries.filter((e) => !e.underBlockOfCharting)
   const categories: ScoreCategory[] = []
 
-  // 1. Order adherence — every initiate/titrate attempt, applied or not.
+  // 1. Order adherence — every initiate/titrate attempt, applied or not. Reads
+  // adherenceFlags (order-compliance at attempt time) rather than outcome === 'applied',
+  // so a training-mode override or validation-mode silent apply — which reach the
+  // infusion despite being off-order — correctly stay out of "met" while still counting
+  // in the denominator.
   {
-    const applied = normalDoseEntries.filter((e) => e.outcome === 'applied').length
+    const applied = normalDoseEntries.filter((e) => adherenceFlags[e.id]).length
     categories.push({
       key: 'adherence',
       label: 'Order adherence',

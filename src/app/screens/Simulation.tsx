@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Button, Toast } from '../../design/primitives'
-import { priorAgentsActivationMet, useSimStore } from '../../state/store'
+import { priorAgentsActivationMet, useSimStore, type PendingOverride } from '../../state/store'
 import { getDrug } from '../../data/formulary'
 import {
   AlarisPump,
@@ -13,15 +13,17 @@ import {
   type PumpChannelInfo,
 } from '../../devices'
 import { VerificationPanel } from '../VerificationPanel'
+import { OverrideConfirmPanel } from '../OverrideConfirmPanel'
 import { ProviderNotifyControl } from '../ProviderNotifyControl'
 import { BlockOfChartingControl } from '../BlockOfChartingControl'
 import type { Infusion, Order } from '../../state/types'
 
-type PendingAction =
-  | { kind: 'beginBag'; infusionId: string }
-  | { kind: 'dose'; orderId: string; dose: number }
-  | { kind: 'restart'; infusionId: string }
-  | { kind: 'discontinue'; infusionId: string }
+/**
+ * BCMA/I-TRACE verification is only required for a new dose entering play (Begin Bag,
+ * initiation) — not every subsequent titration/restart/discontinue on an infusion
+ * that's already hanging and verified (see CLAUDE.md's narrowed verification scope).
+ */
+type PendingAction = { kind: 'beginBag'; infusionId: string } | { kind: 'initiate'; orderId: string; dose: number }
 
 interface PendingInfo {
   title: string
@@ -41,40 +43,22 @@ function buildPendingInfo(pending: PendingAction, infusions: Infusion[], orders:
       ],
     }
   }
-  if (pending.kind === 'dose') {
-    const order = orders.find((o) => o.id === pending.orderId)
-    const drug = order ? getDrug(order.drugId) : null
-    return {
-      title: `${drug?.name ?? ''} — ${pending.dose} ${drug?.unit ?? ''}`,
-      checklist: [
-        'Medication matches the MAR/order (BCMA scan).',
-        'Dose/rate matches what you intend to program.',
-        'Line traced to the patient (I-TRACE).',
-      ],
-    }
-  }
-  if (pending.kind === 'restart') {
-    const infusion = infusions.find((i) => i.id === pending.infusionId)
-    const drug = infusion ? getDrug(infusion.drugId) : null
-    return {
-      title: `Restart — ${drug?.name ?? ''}`,
-      checklist: [
-        'Medication matches the MAR/order (BCMA scan).',
-        'Resuming at the rate in effect immediately before the pause.',
-        'Line traced to the patient (I-TRACE).',
-      ],
-    }
-  }
-  const infusion = infusions.find((i) => i.id === pending.infusionId)
-  const drug = infusion ? getDrug(infusion.drugId) : null
+  const order = orders.find((o) => o.id === pending.orderId)
+  const drug = order ? getDrug(order.drugId) : null
   return {
-    title: `Discontinue — ${drug?.name ?? ''}`,
+    title: `${drug?.name ?? ''} — ${pending.dose} ${drug?.unit ?? ''}`,
     checklist: [
       'Medication matches the MAR/order (BCMA scan).',
-      'Line disconnected from the patient and discarded.',
-      'Charted in MAR.',
+      'Dose/rate matches what you intend to program.',
+      'Line traced to the patient (I-TRACE).',
     ],
   }
+}
+
+function buildOverrideTitle(pending: PendingOverride, orders: Order[]): string {
+  const order = orders.find((o) => o.id === pending.orderId)
+  const drug = order ? getDrug(order.drugId) : null
+  return `${drug?.name ?? ''} — ${pending.dose} ${drug?.unit ?? ''}`
 }
 
 const CLOCK_ADVANCE_OPTIONS = [3, 5, 30]
@@ -106,9 +90,12 @@ export function Simulation() {
   const activeBlockOfCharting = useSimStore((s) => s.activeBlockOfCharting)
   const declareBlockOfCharting = useSimStore((s) => s.declareBlockOfCharting)
   const closeBlockOfCharting = useSimStore((s) => s.closeBlockOfCharting)
+  const pendingOverride = useSimStore((s) => s.pendingOverride)
+  const confirmDoseOverride = useSimStore((s) => s.confirmDoseOverride)
+  const cancelDoseOverride = useSimStore((s) => s.cancelDoseOverride)
 
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
-  const locked = pendingAction !== null
+  const locked = pendingAction !== null || pendingOverride !== null
 
   const channels: PumpChannelInfo[] = [...orders]
     .sort((a, b) => a.sequence - b.sequence)
@@ -130,9 +117,7 @@ export function Simulation() {
   function handleConfirm() {
     if (!pendingAction) return
     if (pendingAction.kind === 'beginBag') completeBeginBag(pendingAction.infusionId)
-    else if (pendingAction.kind === 'dose') submitDose(pendingAction.orderId, pendingAction.dose)
-    else if (pendingAction.kind === 'restart') restartInfusion(pendingAction.infusionId)
-    else discontinueInfusion(pendingAction.infusionId)
+    else submitDose(pendingAction.orderId, pendingAction.dose)
     setPendingAction(null)
   }
 
@@ -163,6 +148,15 @@ export function Simulation() {
         />
       )}
 
+      {pendingOverride && (
+        <OverrideConfirmPanel
+          title={buildOverrideTitle(pendingOverride, orders)}
+          reasons={pendingOverride.reasons}
+          onOverride={confirmDoseOverride}
+          onCancel={cancelDoseOverride}
+        />
+      )}
+
       <PhilipsMonitor vitals={vitals} />
 
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface p-3 shadow-sm">
@@ -183,10 +177,11 @@ export function Simulation() {
             channels={channels}
             clockMinutes={clockMinutes}
             disabled={locked}
-            onRequestProgram={(orderId, dose) => setPendingAction({ kind: 'dose', orderId, dose })}
+            onRequestProgram={(orderId, dose) => setPendingAction({ kind: 'initiate', orderId, dose })}
+            onTitrate={(orderId, dose) => submitDose(orderId, dose)}
             onPause={pauseInfusion}
-            onRequestRestart={(infusionId) => setPendingAction({ kind: 'restart', infusionId })}
-            onRequestDiscontinue={(infusionId) => setPendingAction({ kind: 'discontinue', infusionId })}
+            onRestart={restartInfusion}
+            onDiscontinue={discontinueInfusion}
           />
           <InfusionsPanel infusions={infusions} />
           <BlockOfChartingControl

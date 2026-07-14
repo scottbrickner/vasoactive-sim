@@ -4,7 +4,7 @@
  * 55F, 68 kg, neutropenic septic shock post-induction chemo. Norepinephrine is hanging
  * but Begin Bag is incomplete and the rate is stopped — the learner must verify (I-TRACE),
  * complete Begin Bag, and start at the ordered rate. Agent 2 (vasopressin) activates once
- * norepinephrine is at its ordered maximum with MAP still below target.
+ * norepinephrine reaches 1/3 of its ordered maximum with MAP still below target.
  */
 import type { ScenarioConfig } from '../../state/types'
 
@@ -58,7 +58,11 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
       // Attachment B defines no interval for the shock indication; prescriber-defined here.
       interval: { minMinutes: 30 },
       target: { metric: 'MAP', comparator: '>=', value: 65, unit: 'mmHg' },
-      activatesWhen: 'Norepinephrine at its ordered maximum (30 mcg/min) with MAP still < 65 mmHg.',
+      // 1/3 of norepi's ordered max — real practice adds a second agent well before the
+      // first is maxed out, not only once it's exhausted (see engine/activation.ts for
+      // the derived display text this drives, and store.ts's priorAgentsActivationMet
+      // for the actual comparison).
+      activationThreshold: 1 / 3,
     },
   ],
   responseLagMinutes: { minMinutes: 2, maxMinutes: 5 },

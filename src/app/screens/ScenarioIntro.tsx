@@ -1,6 +1,19 @@
+import { useState } from 'react'
 import { Button, Panel, Toast } from '../../design/primitives'
 import { useSimStore } from '../../state/store'
 import { DEFAULT_SCENARIO } from '../../data/scenarios'
+import type { SimMode } from '../../state/types'
+
+const MODE_COPY: Record<SimMode, { label: string; description: string }> = {
+  training: {
+    label: 'Training',
+    description: 'Real-time coaching — an off-order dose pauses for a confirm/override decision.',
+  },
+  validation: {
+    label: 'Validation',
+    description: 'No real-time coaching — off-order doses apply silently and are scored at debrief.',
+  },
+}
 
 /** Scenario briefing, drawn from the real scenario config. "Begin simulation" (re)initializes the store. */
 export function ScenarioIntro() {
@@ -8,9 +21,10 @@ export function ScenarioIntro() {
   const setPhase = useSimStore((s) => s.setPhase)
   const { patient, admissionReason, orders } = DEFAULT_SCENARIO
   const primaryTarget = orders.find((o) => o.sequence === 1)?.target
+  const [mode, setMode] = useState<SimMode>('training')
 
   const handleBegin = () => {
-    startScenario(DEFAULT_SCENARIO)
+    startScenario(DEFAULT_SCENARIO, mode)
     setPhase('sim')
   }
 
@@ -44,6 +58,25 @@ export function ScenarioIntro() {
         Open any resource at any time. Every action is checked against the order and CP 4-156 — you'll
         see guidance inline, not a wall of red.
       </Toast>
+
+      <Panel title="Session mode">
+        <div className="flex flex-col gap-3 sm:flex-row">
+          {(Object.keys(MODE_COPY) as SimMode[]).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              aria-pressed={mode === m}
+              className={`flex-1 rounded-md border px-4 py-3 text-left transition-colors ${
+                mode === m ? 'border-cardinal bg-cardinal/6' : 'border-border bg-surface hover:bg-cardinal/4'
+              }`}
+            >
+              <span className="text-base font-semibold text-ink">{MODE_COPY[m].label}</span>
+              <p className="mt-1 text-sm text-muted">{MODE_COPY[m].description}</p>
+            </button>
+          ))}
+        </div>
+      </Panel>
 
       <div>
         <Button size="lg" onClick={handleBegin}>

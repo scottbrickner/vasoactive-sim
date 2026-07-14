@@ -7,7 +7,7 @@ const NOREPI_ORDER_ID = 'order-norepinephrine-agent1'
 const VASOPRESSIN_ORDER_ID = 'order-vasopressin-agent2'
 
 beforeEach(() => {
-  useSimStore.getState().startScenario(DEFAULT_SCENARIO)
+  useSimStore.getState().startScenario(DEFAULT_SCENARIO, 'training')
   useSimStore.setState({ phase: 'sim' })
 })
 
@@ -56,13 +56,29 @@ describe('scoreSession — off-order titration', () => {
     const s = useSimStore.getState()
     s.completeBeginBag(norepiInfusionId())
     s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate ok
-    s.submitDose(NOREPI_ORDER_ID, 1) // titrate at t=0, 0 min elapsed — too soon (needs 3)
+    s.submitDose(NOREPI_ORDER_ID, 1) // titrate at t=0, 0 min elapsed — too soon (needs 3), deferred
+    s.cancelDoseOverride() // training mode — logs it as off-order, matching the old immediate-reject behavior
     expect(categoryStatus('adherence')).toBe('partial')
     // Only one titration was attempted and it violated the interval, so 0-of-1 is
     // correctly "missed" here, not "partial" — partial would need a mix of both.
     expect(categoryStatus('intervalIncrement')).toBe('missed')
     const card = score()
     expect(card.opportunities.some((o) => /interval & increment/i.test(o) || /interval/i.test(o))).toBe(true)
+  })
+})
+
+describe('scoreSession — overridden dose entries', () => {
+  it('counts an overridden dose in the adherence denominator but not the numerator', () => {
+    const s = useSimStore.getState()
+    s.completeBeginBag(norepiInfusionId())
+    s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate ok
+    s.submitDose(NOREPI_ORDER_ID, 1) // titrate at t=0 — too soon, deferred
+    s.confirmDoseOverride() // training-mode override — applies despite being off-order
+    // 1 clean (initiate) + 1 overridden (titrate) = 2 total, only 1 counted as adherent.
+    expect(categoryStatus('adherence')).toBe('partial')
+    const card = score()
+    const adherence = card.categories.find((c) => c.key === 'adherence')!
+    expect(adherence.detail).toMatch(/1 of 2/)
   })
 })
 
@@ -97,6 +113,7 @@ describe('scoreSession — needs-provider and notification', () => {
 describe('scoreSession — sequencing violation', () => {
   it('is partial when agent 2 is attempted before activation, but never "missed" (hard-blocked)', () => {
     useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.02)
+    useSimStore.getState().cancelDoseOverride()
     expect(categoryStatus('sequencing')).toBe('partial')
   })
 })

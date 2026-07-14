@@ -30,7 +30,9 @@ export function Debrief() {
   const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory })
 
   const handleRestart = () => {
-    startScenario(DEFAULT_SCENARIO)
+    // Restarting returns to the intro screen, where the learner picks a mode again —
+    // this default is only ever visible for the instant before ScenarioIntro re-mounts.
+    startScenario(DEFAULT_SCENARIO, 'training')
     setPhase('intro')
   }
 

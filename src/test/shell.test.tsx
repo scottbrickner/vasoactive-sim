@@ -8,7 +8,7 @@ import { DEFAULT_SCENARIO } from '../data/scenarios'
 afterEach(() => {
   cleanup()
   // Reset the sim store between tests so each test starts from a clean 'intro' state.
-  useSimStore.getState().startScenario(DEFAULT_SCENARIO)
+  useSimStore.getState().startScenario(DEFAULT_SCENARIO, 'training')
   useSimStore.setState({ phase: 'intro' })
 })
 

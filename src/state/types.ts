@@ -8,6 +8,15 @@
 /** The three top-level phases of the learner flow. Mirrors the eventual SimState.phase. */
 export type Phase = 'intro' | 'sim' | 'debrief'
 
+/**
+ * Training mode coaches in real time and lets the learner override an off-order dose
+ * with confirmation; validation mode applies an off-order-but-within-Guardrails dose
+ * silently (matching a real Alaris pump, which doesn't know the written order) and
+ * scores it only at debrief. Needs-provider and Guardrails hard-limit are hard stops
+ * in both modes — never overridable (see docs/CLINICAL_SPEC.md).
+ */
+export type SimMode = 'training' | 'validation'
+
 /** Placeholder header readout. Real values will be driven by the physiology engine (Phase 4). */
 export interface HeaderReadout {
   /** Elapsed simulation time, in minutes. */
@@ -94,6 +103,13 @@ export interface Order {
   target: TitrationTarget
   /** Human-readable activation condition for agents beyond sequence 1. */
   activatesWhen?: string
+  /**
+   * For sequence > 1: fraction (0,1] of the prior agent's own maxDose that activates
+   * this order (target still unmet). Omitted defaults to 1 ("prior agent at its own
+   * max"). See engine/activation.ts's deriveActivationText, which derives
+   * `activatesWhen` from this so the display text can't drift from the real threshold.
+   */
+  activationThreshold?: number
 }
 
 export type InfusionStatus = 'hanging' | 'infusing' | 'stopped'
@@ -187,6 +203,12 @@ export interface LogEntry {
   lifecycleAction?: 'pause' | 'restart' | 'discontinue' | 'blockDeclared' | 'blockClosed'
   /** True when this dose-entry action was taken under an active Block of Charting for the same order (CP 4-156's emergent free-titration pathway) — order-compliance checks are bypassed, so scoring must not count it as off-order. */
   underBlockOfCharting?: boolean
+  /**
+   * True when an 'applied' dose reached the infusion despite an off-order violation,
+   * via training-mode override or validation-mode silent apply. Never true for
+   * needs-provider/hardLimitBlocked entries — those never apply in either mode.
+   */
+  overridden?: boolean
 }
 
 /**
@@ -247,6 +269,7 @@ export interface ScenarioConfig {
 /** The full simulation state (BUILD_BRIEF §8), driven by the Zustand store in state/store.ts. */
 export interface SimState {
   phase: Phase
+  mode: SimMode
   clockMinutes: number
   infusions: Infusion[]
   vitals: VitalSigns
