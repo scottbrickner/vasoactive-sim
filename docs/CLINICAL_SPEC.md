@@ -196,6 +196,7 @@ Documentation:      Begin Bag + initial rate in MAR; titrations in iView; criter
 - **Scenario diagnosis** (neutropenic septic shock post-chemo) is an oncology-ICU-appropriate example; swap for a post-op, tumor-lysis, or obstructive-shock picture if you'd rather.
 - The **Cerner MAR/iView** conventions reference the CST Cerner help site — that portal is JavaScript-driven so I couldn't pull specific screen layouts; the AI will approximate CST conventions and you can validate against the site.
 - The **reference library folder** is currently a fillable placeholder (`{{folder link / ID}}`). I tried to locate it in your Google Drive but the connector action wasn't approved, so I couldn't read the folder or list its contents. Re-approve Drive access (or paste the folder link) and I'll drop in the exact link and a short inventory of what's inside, so the simulator knows precisely what evidence and templates it can draw on.
+- **Correction (per educator, supersedes item 5 above):** vasoactives are NOT designated high-alert medications at this institution and do NOT require an independent (two-nurse) double-check. BCMA verification against the order and I-TRACE line-tracing still apply at initiation and every titration, performed by the administering nurse alone. `CLAUDE.md`'s non-negotiable rules and the app implementation reflect this correction; treat this note as authoritative over the original prompt text below.
 
 ## The design decision from last round, now resolved by policy
 

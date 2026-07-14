@@ -1,9 +1,19 @@
 import { Button, Panel, Toast } from '../../design/primitives'
-import { useShellStore } from '../../state/store'
+import { useSimStore } from '../../state/store'
+import { DEFAULT_SCENARIO } from '../../data/scenarios'
 
-/** Phase 1 placeholder for the Scenario Intro. Real patient/order briefing arrives in later phases. */
+/** Scenario briefing, drawn from the real scenario config. "Begin simulation" (re)initializes the store. */
 export function ScenarioIntro() {
-  const setPhase = useShellStore((s) => s.setPhase)
+  const startScenario = useSimStore((s) => s.startScenario)
+  const setPhase = useSimStore((s) => s.setPhase)
+  const { patient, admissionReason, orders } = DEFAULT_SCENARIO
+  const primaryTarget = orders.find((o) => o.sequence === 1)?.target
+
+  const handleBegin = () => {
+    startScenario(DEFAULT_SCENARIO)
+    setPhase('sim')
+  }
+
   return (
     <div className="flex flex-col gap-gutter">
       <div>
@@ -15,15 +25,12 @@ export function ScenarioIntro() {
         </p>
       </div>
 
-      <Panel
-        title="Patient briefing"
-        subtitle="Placeholder — scenario data is authored in Phase 2"
-      >
+      <Panel title="Patient briefing">
         <dl className="grid gap-4 sm:grid-cols-3">
           {[
-            ['Patient', '55 F · 68 kg'],
-            ['Admission', 'Neutropenic septic shock'],
-            ['Goal', 'MAP ≥ 65 mmHg'],
+            ['Patient', `${patient.ageYears} ${patient.sex === 'female' ? 'F' : 'M'} · ${patient.weightKg} kg`],
+            ['Admission', admissionReason],
+            ['Goal', primaryTarget ? `${primaryTarget.metric} ${primaryTarget.comparator} ${primaryTarget.value} ${primaryTarget.unit}` : '—'],
           ].map(([label, value]) => (
             <div key={label}>
               <dt className="text-xs font-semibold tracking-wide text-muted uppercase">{label}</dt>
@@ -39,7 +46,7 @@ export function ScenarioIntro() {
       </Toast>
 
       <div>
-        <Button size="lg" onClick={() => setPhase('sim')}>
+        <Button size="lg" onClick={handleBegin}>
           Begin simulation
         </Button>
       </div>

@@ -55,13 +55,21 @@ export const DOCUMENTATION_PLACEMENT: Record<
   discontinuation: 'MAR',
 }
 
-/** Vasoactives are high-alert: independent double-check + BCMA at initiation and every titration. */
-export const HIGH_ALERT_DOUBLE_CHECK = {
-  required: true,
+/**
+ * Vasoactives are NOT designated high-alert at this institution — no independent
+ * (two-nurse) double-check is required. BCMA verification against the order and
+ * I-TRACE line-tracing still apply, performed by the administering nurse alone, at
+ * initiation and every titration.
+ */
+export const MEDICATION_VERIFICATION = {
+  independentDoubleCheckRequired: false,
+  bcmaRequired: true,
+  iTraceRequired: true,
   appliesTo: ['initiation', 'titration'] as const,
   description:
-    'Vasoactive infusions are high-alert: an independent double-check and BCMA (barcode) ' +
-    'verification against the order are required at initiation and at every titration (I-TRACE).',
+    'Vasoactive infusions are not high-alert here, so no independent (two-nurse) double-check ' +
+    'is required. The administering nurse still verifies the medication against the order via ' +
+    'BCMA and traces the line to the patient (I-TRACE) at initiation and at every titration.',
 }
 
 /**

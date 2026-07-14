@@ -9,6 +9,8 @@ export interface ToastProps {
   children?: ReactNode
   /** When provided, renders a dismiss control. */
   onDismiss?: () => void
+  /** Optional call-to-action button (e.g. "Notify Provider"). */
+  action?: { label: string; onClick: () => void }
   className?: string
 }
 
@@ -51,7 +53,7 @@ const toneMeta: Record<
  * Coaching surface for the friendly shell — an inline card, never a wall of red text.
  * Non-punitive by design: warnings use warm gold, meaning is carried by icon + label.
  */
-export function Toast({ tone = 'info', title, children, onDismiss, className }: ToastProps) {
+export function Toast({ tone = 'info', title, children, onDismiss, action, className }: ToastProps) {
   const meta = toneMeta[tone]
   return (
     <div
@@ -78,6 +80,15 @@ export function Toast({ tone = 'info', title, children, onDismiss, className }: 
         )}
         {children != null && (
           <div className={cn('text-sm text-muted', title != null && 'mt-0.5')}>{children}</div>
+        )}
+        {action && (
+          <button
+            type="button"
+            onClick={action.onClick}
+            className="mt-2 text-sm font-semibold text-cardinal underline decoration-1 underline-offset-2 hover:text-cardinal-dark focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cardinal"
+          >
+            {action.label}
+          </button>
         )}
       </div>
       {onDismiss && (

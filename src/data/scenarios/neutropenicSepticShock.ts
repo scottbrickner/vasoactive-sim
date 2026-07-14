@@ -30,8 +30,10 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
     drugId: 'norepinephrine',
     status: 'hanging',
     rate: 0,
+    initialRate: null,
     channel: 'A',
     beginBagCompleted: false,
+    lastActionMinute: null,
   },
   orders: [
     {
@@ -58,4 +60,29 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
     },
   ],
   responseLagMinutes: { minMinutes: 2, maxMinutes: 5 },
+  // Declining trend into shock, ending at startingVitals — context a nurse coming onto
+  // shift would always see. Never a hint about what/when to chart (see CernerIView).
+  priorVitals: [
+    {
+      minutesBeforeStart: 180,
+      vitals: { hr: 92, sbp: 108, dbp: 68, map: 81, spo2: 98, rhythm: 'Sinus rhythm' },
+    },
+    {
+      minutesBeforeStart: 120,
+      vitals: { hr: 104, sbp: 96, dbp: 58, map: 71, spo2: 97, rhythm: 'Sinus tachycardia' },
+    },
+    {
+      minutesBeforeStart: 60,
+      vitals: { hr: 112, sbp: 88, dbp: 52, map: 64, spo2: 97, rhythm: 'Sinus tachycardia' },
+    },
+  ],
+  // Illustrative response ceilings (not sourced from Attachment B — physiology.ts is
+  // scenario-tuned data, see its module doc). Norepinephrine alone, even at its ordered
+  // maximum, is deliberately tuned to fall short of target (57 + 6 = 63 < 65) — this is
+  // what drives the need for agent 2. Adding vasopressin at its max closes the gap
+  // (63 + 5 = 68 >= 65), matching CLINICAL_SPEC.md's worked example.
+  responseModel: {
+    norepinephrine: { maxMapContribution: 6 },
+    vasopressin: { maxMapContribution: 5 },
+  },
 }

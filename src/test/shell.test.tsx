@@ -2,12 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from '../App'
-import { useShellStore } from '../state/store'
+import { useSimStore } from '../state/store'
+import { DEFAULT_SCENARIO } from '../data/scenarios'
 
 afterEach(() => {
   cleanup()
-  // Reset the shell store between tests so phase transitions start from 'intro'.
-  useShellStore.setState({ phase: 'intro' })
+  // Reset the sim store between tests so each test starts from a clean 'intro' state.
+  useSimStore.getState().startScenario(DEFAULT_SCENARIO)
+  useSimStore.setState({ phase: 'intro' })
 })
 
 describe('app shell', () => {

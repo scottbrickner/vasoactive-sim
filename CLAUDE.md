@@ -14,7 +14,7 @@ A device-fidelity, browser-based clinical simulator for oncology-ICU RNs: initia
 **If sources conflict, institutional policy (1–2) governs.**
 
 ## Non-negotiable clinical rules
-- Vasoactives are HIGH-ALERT: require independent double-check at initiation and each titration; BCMA verify against the order.
+- Vasoactives are NOT designated high-alert at this institution — no independent (two-nurse) double-check is required. BCMA verification against the order and I-TRACE line-tracing still apply at initiation and each titration, performed by the administering nurse alone.
 - Documentation cadence: initiation, +30 min after start, before each titration, +30 min after each titration.
 - Placement: Begin Bag + initial rate in MAR; subsequent titrations in iView; discontinuation in MAR.
 - Never present an unsafe or off-order action as correct. Off-order-by-error → corrective feedback. Clinically needed beyond the order (e.g., at max, still hypotensive) → notify provider before proceeding.

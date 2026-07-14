@@ -1,14 +1,17 @@
 import { cerner } from '../../design/deviceTokens'
+import { Button } from '../../design/primitives'
 import { getDrug } from '../../data/formulary'
-import type { Infusion, Order } from '../../state/types'
+import type { Infusion } from '../../state/types'
 
 export interface CernerMARProps {
   infusions: Infusion[]
-  orders: Order[]
+  onRequestBeginBag: (infusionId: string) => void
+  /** True while a verification confirmation is pending elsewhere on the page. */
+  disabled?: boolean
 }
 
 /** Faithful (not stylized) replica of the Cerner MAR — Begin Bag + initial rate (CP 4-156). */
-export function CernerMAR({ infusions, orders }: CernerMARProps) {
+export function CernerMAR({ infusions, onRequestBeginBag, disabled }: CernerMARProps) {
   return (
     <div className="overflow-hidden rounded-md border" style={{ borderColor: cerner.gridLine }}>
       <div
@@ -34,7 +37,6 @@ export function CernerMAR({ infusions, orders }: CernerMARProps) {
           </thead>
           <tbody>
             {infusions.map((infusion) => {
-              const order = orders.find((o) => o.id === infusion.orderId)
               const drug = getDrug(infusion.drugId)
               return (
                 <tr key={infusion.id} className="border-b last:border-0" style={{ borderColor: cerner.gridLine }}>
@@ -45,10 +47,20 @@ export function CernerMAR({ infusions, orders }: CernerMARProps) {
                     </div>
                   </td>
                   <td className="px-3 py-2">
-                    <BeginBagBadge complete={infusion.beginBagCompleted} />
+                    {infusion.beginBagCompleted ? (
+                      <BeginBagBadge complete />
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <BeginBagBadge complete={false} />
+                        <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onRequestBeginBag(infusion.id)}>
+                          Complete Begin Bag
+                        </Button>
+                      </div>
+                    )}
                   </td>
+                  {/* Fixed at initiation — never updated by later titrations (those chart in iView). */}
                   <td className="px-3 py-2 tabular-nums whitespace-nowrap">
-                    {order ? `${order.startDose} ${drug.unit}` : '—'}
+                    {infusion.initialRate != null ? `${infusion.initialRate} ${drug.unit}` : '—'}
                   </td>
                   <td className="px-3 py-2">{infusion.channel}</td>
                 </tr>
@@ -64,7 +76,7 @@ export function CernerMAR({ infusions, orders }: CernerMARProps) {
 function BeginBagBadge({ complete }: { complete: boolean }) {
   return (
     <span
-      className="rounded px-2 py-0.5 text-xs font-semibold"
+      className="rounded px-2 py-0.5 text-xs font-semibold whitespace-nowrap"
       style={{
         backgroundColor: complete ? cerner.completeBg : cerner.pendingBg,
         color: complete ? cerner.complete : cerner.pending,

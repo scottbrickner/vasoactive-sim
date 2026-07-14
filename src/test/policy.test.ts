@@ -3,7 +3,7 @@ import {
   BLOCK_OF_CHARTING,
   DOCUMENTATION_CADENCE,
   DOCUMENTATION_PLACEMENT,
-  HIGH_ALERT_DOUBLE_CHECK,
+  MEDICATION_VERIFICATION,
   OFF_FOR_TWO_HOURS_RULE,
   RESTART_AFTER_PAUSE_RULE,
   STABLE_OFF_TWO_HOURS_RULE,
@@ -26,9 +26,11 @@ describe('policy constants (CP 4-156)', () => {
     expect(DOCUMENTATION_PLACEMENT.discontinuation).toBe('MAR')
   })
 
-  it('requires an independent double-check at initiation and every titration', () => {
-    expect(HIGH_ALERT_DOUBLE_CHECK.required).toBe(true)
-    expect(HIGH_ALERT_DOUBLE_CHECK.appliesTo).toEqual(['initiation', 'titration'])
+  it('does not require an independent double-check, but does require BCMA/I-TRACE at initiation and every titration', () => {
+    expect(MEDICATION_VERIFICATION.independentDoubleCheckRequired).toBe(false)
+    expect(MEDICATION_VERIFICATION.bcmaRequired).toBe(true)
+    expect(MEDICATION_VERIFICATION.iTraceRequired).toBe(true)
+    expect(MEDICATION_VERIFICATION.appliesTo).toEqual(['initiation', 'titration'])
   })
 
   it('defines the restart-after-pause and 2-hour rules', () => {

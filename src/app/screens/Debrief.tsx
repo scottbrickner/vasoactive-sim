@@ -1,12 +1,19 @@
 import { Button, Panel, Toast } from '../../design/primitives'
-import { useShellStore } from '../../state/store'
+import { useSimStore } from '../../state/store'
+import { DEFAULT_SCENARIO } from '../../data/scenarios'
 
 /**
- * Phase 1 placeholder for the Debrief. The real scorecard, Cerner-style documentation
- * review, and cited coaching summary are built in Phase 6.
+ * Placeholder for the Debrief. The real scorecard, Cerner-style documentation review,
+ * and cited coaching summary are built in Phase 6.
  */
 export function Debrief() {
-  const setPhase = useShellStore((s) => s.setPhase)
+  const startScenario = useSimStore((s) => s.startScenario)
+  const setPhase = useSimStore((s) => s.setPhase)
+
+  const handleRestart = () => {
+    startScenario(DEFAULT_SCENARIO)
+    setPhase('intro')
+  }
   return (
     <div className="flex flex-col gap-gutter">
       <div>
@@ -50,7 +57,7 @@ export function Debrief() {
       </Toast>
 
       <div>
-        <Button variant="secondary" onClick={() => setPhase('intro')}>
+        <Button variant="secondary" onClick={handleRestart}>
           Restart simulation
         </Button>
       </div>

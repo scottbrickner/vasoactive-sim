@@ -1,8 +1,8 @@
 /**
- * Shell types (Phase 1) + clinical state model (Phase 2), per docs/BUILD_BRIEF.md §8.
+ * Shell types (Phase 1) + clinical state model (Phase 2+), per docs/BUILD_BRIEF.md §8.
  *
- * The clinical engine that operates on these types (titrationEngine, guardrails,
- * physiology, clock, documentation, scoring) is Phase 4 — not implemented here.
+ * The clinical engine (titrationEngine, guardrails, physiology, clock, documentation)
+ * lives in src/engine/ and operates on these types; scoring.ts (debrief) is Phase 6.
  */
 
 /** The three top-level phases of the learner flow. Mirrors the eventual SimState.phase. */
@@ -105,9 +105,17 @@ export interface Infusion {
   status: InfusionStatus
   /** Current programmed rate/dose in the drug's own unit (0 before Begin Bag / start). */
   rate: number
+  /**
+   * The rate charted in the MAR at initiation — fixed once set, never updated by later
+   * titrations (those chart in iView instead; see data/policy.ts DOCUMENTATION_PLACEMENT).
+   * Null until the infusion has actually been initiated.
+   */
+  initialRate: number | null
   /** Alaris pump channel, e.g. 'A'. */
   channel: string
   beginBagCompleted: boolean
+  /** Sim minute of the last dose-changing action for this infusion (initiation counts); null before initiation. */
+  lastActionMinute: number | null
 }
 
 export interface VitalSigns {
@@ -136,12 +144,31 @@ export interface LogEntry {
   summary: string
   /** Required for documentation entries (MAR vs iView placement). */
   location?: DocumentationLocation
+  /** Vitals captured at the time of a documentation entry. */
+  vitalsSnapshot?: VitalSigns
 }
 
 export interface Patient {
   ageYears: number
   sex: 'female' | 'male'
   weightKg: number
+}
+
+/** A single historical vitals reading shown in iView before sim start — context only. */
+export interface PriorVitalsPoint {
+  /** How long before sim start (minute 0) this reading was taken. */
+  minutesBeforeStart: number
+  vitals: VitalSigns
+}
+
+/**
+ * Physiology tuning for one drug in this scenario: the MAP (mmHg) it contributes once
+ * fully responded, at its own ordered maximum dose. Deliberately scenario data, not
+ * hardcoded in engine/physiology.ts (see that module's doc comment) — different
+ * scenarios/patients respond differently to the same drug.
+ */
+export interface ResponseModelEntry {
+  maxMapContribution: number
 }
 
 /** A complete case: patient, starting state, and the titratable order(s) that govern it. */
@@ -154,13 +181,13 @@ export interface ScenarioConfig {
   orders: Order[]
   /** Time for the monitor to reflect a correct titration. */
   responseLagMinutes: TitrationInterval
+  /** Historical readings shown in iView before sim start (oldest first). Never a hint about what to chart next. */
+  priorVitals: PriorVitalsPoint[]
+  /** Per-drug MAP response ceilings, keyed by DrugId. */
+  responseModel: Partial<Record<DrugId, ResponseModelEntry>>
 }
 
-/**
- * The full simulation state (BUILD_BRIEF §8). Not yet wired into the Zustand store —
- * the store actions that produce it (startInfusion, titrate, document, notifyProvider,
- * advanceClock) arrive with the engine in Phase 4/5.
- */
+/** The full simulation state (BUILD_BRIEF §8), driven by the Zustand store in state/store.ts. */
 export interface SimState {
   phase: Phase
   clockMinutes: number
@@ -168,8 +195,14 @@ export interface SimState {
   vitals: VitalSigns
   orders: Order[]
   log: LogEntry[]
-  /** Independent double-check completion, keyed by the action's LogEntry id. */
-  doubleCheckFlags: Record<string, boolean>
+  /** BCMA/I-TRACE verification completion, keyed by the action's LogEntry id. */
+  verificationFlags: Record<string, boolean>
   /** Order-adherence flags, keyed by the action's LogEntry id. */
   adherenceFlags: Record<string, boolean>
+  /**
+   * Physiology interpolation anchor: the MAP value and sim minute at the most recent
+   * dose-changing action, from which advanceClock interpolates toward the newly
+   * projected MAP. Null before the first titration.
+   */
+  lastPhysiologyUpdate: { minute: number; map: number } | null
 }

@@ -1,12 +1,6 @@
-import { useShellStore } from '../state/store'
+import { useSimStore } from '../state/store'
 import type { HeaderReadout } from '../state/types'
-
-function formatClock(minutes: number): string {
-  const total = Math.max(0, Math.floor(minutes))
-  const hh = String(Math.floor(total / 60)).padStart(2, '0')
-  const mm = String(total % 60).padStart(2, '0')
-  return `${hh}:${mm}`
-}
+import { formatClock } from '../lib/time'
 
 interface StatProps {
   label: string
@@ -31,7 +25,19 @@ function Stat({ label, value, unit, emphasis }: StatProps) {
 
 /** Persistent branded header: USC wordmark + live sim clock / current MAP / target readout. */
 export function Header() {
-  const header = useShellStore((s) => s.header)
+  const phase = useSimStore((s) => s.phase)
+  const clockMinutes = useSimStore((s) => s.clockMinutes)
+  const map = useSimStore((s) => s.vitals.map)
+  const orders = useSimStore((s) => s.orders)
+  const targetMap = orders.find((o) => o.sequence === 1)?.target.value ?? 0
+
+  const header: HeaderReadout = {
+    clockMinutes,
+    // No live vitals to show until the sim actually starts.
+    currentMap: phase === 'intro' ? null : map,
+    targetMap,
+  }
+
   return (
     <header className="sticky top-0 z-40 border-b-4 border-gold bg-cardinal text-white shadow-md">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-gutter py-3">
