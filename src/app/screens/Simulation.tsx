@@ -140,7 +140,7 @@ export function Simulation() {
         <p className="text-sm font-semibold tracking-wide text-cardinal uppercase">Simulation</p>
         <h1 className="mt-1 text-3xl font-bold text-ink">Bedside workspace</h1>
         <p className="mt-2 max-w-2xl text-lg text-muted">
-          Faithful device replicas — deliberately separate from the branded shell around them.
+          Program and titrate exactly as ordered, document per policy, and get coached along the way.
         </p>
       </div>
 
@@ -178,7 +178,7 @@ export function Simulation() {
         />
       )}
 
-      <PhilipsMonitor vitals={vitals} />
+      <PhilipsMonitor vitals={vitals} startingVitals={scenario.startingVitals} />
 
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface p-3 shadow-sm">
         <span className="text-sm font-semibold text-ink">Advance time</span>
@@ -192,7 +192,7 @@ export function Simulation() {
         </div>
       </div>
 
-      <div className="grid gap-gutter lg:grid-cols-2">
+      <div className="grid gap-gutter md:grid-cols-2">
         <div className="flex flex-col gap-gutter">
           <AlarisPump
             channels={channels}

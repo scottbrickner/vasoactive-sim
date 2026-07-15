@@ -1,16 +1,30 @@
+import type { ReactNode } from 'react'
 import { philips } from '../../design/deviceTokens'
 import type { VitalSigns } from '../../state/types'
+import { Waveform } from './Waveform'
 
 export interface PhilipsMonitorProps {
   vitals: VitalSigns
+  /** Scenario baseline vitals — only used to scale the ABP trace's amplitude against the live pulse pressure. */
+  startingVitals: VitalSigns
 }
 
 /**
- * Faithful (not stylized) replica of a Philips IntelliVue bedside monitor.
- * Static for Phase 3 — the waveforms are decorative, not physiology-driven
- * (that's the physiology engine, Phase 4+).
+ * Faithful (not stylized) replica of a Philips IntelliVue bedside monitor. Waveforms
+ * are continuously animated (see Waveform.tsx) but the shapes themselves are still
+ * decorative, not derived from real waveform data. MAP/SBP/DBP respond to titration;
+ * HR/SBP/DBP additionally carry natural periodic variability layered on top (see
+ * state/store.ts's advanceClock and engine/physiology.ts's periodicVariability) — MAP
+ * itself deliberately never jitters, since clinical logic keys off its exact value.
+ * SpO2/rhythm stay frozen at scenario starting values until Phase 12 makes HR/SpO2
+ * actually respond to titration (a different thing from 8d's variability).
  */
-export function PhilipsMonitor({ vitals }: PhilipsMonitorProps) {
+export function PhilipsMonitor({ vitals, startingVitals }: PhilipsMonitorProps) {
+  const cycleSeconds = 60 / vitals.hr
+  const startingPulsePressure = startingVitals.sbp - startingVitals.dbp
+  const livePulsePressure = vitals.sbp - vitals.dbp
+  const abpAmplitudeScale = startingPulsePressure > 0 ? livePulsePressure / startingPulsePressure : 1
+
   return (
     <div
       className="overflow-hidden rounded-md border"
@@ -25,16 +39,15 @@ export function PhilipsMonitor({ vitals }: PhilipsMonitorProps) {
       </div>
 
       <div className="grid grid-cols-1 divide-y sm:grid-cols-3 sm:divide-x sm:divide-y-0" style={{ borderColor: philips.panelBorder }}>
-        <VitalTile label="HR" value={vitals.hr} unit="bpm" color={philips.ecgGreen} waveform="ecg" />
-        <VitalTile
-          label="ABP"
-          value={`${vitals.sbp}/${vitals.dbp}`}
-          sub={`(${vitals.map})`}
-          unit="mmHg"
-          color={philips.abpRed}
-          waveform="art"
-        />
-        <VitalTile label="SpO2" value={vitals.spo2} unit="%" color={philips.spo2Cyan} />
+        <VitalTile label="HR" value={vitals.hr} unit="bpm" color={philips.ecgGreen}>
+          <Waveform kind="ecg" color={philips.ecgGreen} cycleSeconds={cycleSeconds} />
+        </VitalTile>
+        <VitalTile label="ABP" value={`${vitals.sbp}/${vitals.dbp}`} sub={`(${vitals.map})`} unit="mmHg" color={philips.abpRed}>
+          <Waveform kind="art" color={philips.abpRed} cycleSeconds={cycleSeconds} amplitudeScale={abpAmplitudeScale} />
+        </VitalTile>
+        <VitalTile label="SpO2" value={vitals.spo2} unit="%" color={philips.spo2Cyan}>
+          <Waveform kind="pleth" color={philips.spo2Cyan} cycleSeconds={cycleSeconds} />
+        </VitalTile>
       </div>
     </div>
   )
@@ -46,10 +59,10 @@ interface VitalTileProps {
   sub?: string
   unit: string
   color: string
-  waveform?: 'ecg' | 'art'
+  children?: ReactNode
 }
 
-function VitalTile({ label, value, sub, unit, color, waveform }: VitalTileProps) {
+function VitalTile({ label, value, sub, unit, color, children }: VitalTileProps) {
   return (
     <div className="px-4 py-3" style={{ borderColor: philips.panelBorder }}>
       <div className="flex items-baseline justify-between">
@@ -64,20 +77,7 @@ function VitalTile({ label, value, sub, unit, color, waveform }: VitalTileProps)
         {value}
         {sub && <span className="ml-1 text-lg font-normal">{sub}</span>}
       </div>
-      {waveform && <Waveform color={color} kind={waveform} />}
+      {children}
     </div>
-  )
-}
-
-/** Decorative static trace — NOT derived from real waveform data. */
-function Waveform({ color, kind }: { color: string; kind: 'ecg' | 'art' }) {
-  const path =
-    kind === 'ecg'
-      ? 'M0,10 L8,10 L11,10 L13,2 L15,18 L17,4 L19,10 L26,10 L34,10 L37,10 L39,2 L41,18 L43,4 L45,10 L52,10 L60,10'
-      : 'M0,12 C6,4 10,2 14,6 C18,10 20,14 24,10 C28,6 32,4 36,8 C40,12 44,14 48,10 C52,6 56,4 60,8'
-  return (
-    <svg aria-hidden="true" viewBox="0 0 60 20" className="mt-2 h-6 w-full" preserveAspectRatio="none">
-      <path d={path} fill="none" stroke={color} strokeWidth="1" opacity={0.8} />
-    </svg>
   )
 }

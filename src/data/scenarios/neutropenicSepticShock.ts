@@ -91,4 +91,9 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
     norepinephrine: { maxMapContribution: 6 },
     vasopressin: { maxMapContribution: 5 },
   },
+  // Illustrative deterioration curve: untreated septic shock doesn't hold steady at
+  // 57 — MAP declines further the longer no agent is actively infusing. 0.5 mmHg/min
+  // reaches the 15 mmHg cap (MAP 42) after 30 min untreated, a realistic window for a
+  // training scenario where a nurse might legitimately take some minutes to intervene.
+  deterioration: { ratePerMinute: 0.5, maxDrop: 15 },
 }

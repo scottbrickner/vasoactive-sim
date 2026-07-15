@@ -1,11 +1,28 @@
 import { describe, expect, it } from 'vitest'
-import { projectDoseResponse, projectMap, responseFraction, stepTowardTarget } from '../engine/physiology'
+import {
+  accumulateDeterioration,
+  deriveBloodPressure,
+  periodicVariability,
+  projectDoseResponse,
+  projectMap,
+  responseFraction,
+  stepTowardTarget,
+} from '../engine/physiology'
 
 describe('physiology.projectDoseResponse', () => {
-  it('scales linearly from 0 at dose 0 to the ceiling at maxDose', () => {
+  it('scales via sqrt(fraction) from 0 at dose 0 to the ceiling at maxDose', () => {
     expect(projectDoseResponse(0, 30, 10)).toBe(0)
-    expect(projectDoseResponse(15, 30, 10)).toBe(5)
+    expect(projectDoseResponse(15, 30, 10)).toBeCloseTo(Math.sqrt(0.5) * 10) // ≈ 7.07
     expect(projectDoseResponse(30, 30, 10)).toBe(10)
+  })
+
+  it('is more responsive at low doses than a straight line would be', () => {
+    // At 3/30 (10% of max), sqrt(0.1) ≈ 0.316 — over 3x the linear contribution at
+    // that point (0.1 * 10 = 1) — this is what keeps early titrations from rounding
+    // to zero on the monitor.
+    const lowDoseContribution = projectDoseResponse(3, 30, 10)
+    const linearEquivalent = (3 / 30) * 10
+    expect(lowDoseContribution).toBeGreaterThan(linearEquivalent * 3)
   })
 
   it('clamps doses outside [0, maxDose]', () => {
@@ -94,5 +111,73 @@ describe('physiology — scenario narrative: norepi alone is insufficient, vasop
     const settled = stepTowardTarget(baselineMap, projected, 1)
     expect(settled).toBeGreaterThan(baselineMap)
     expect(settled).toBeLessThan(65)
+  })
+})
+
+describe('physiology.deriveBloodPressure', () => {
+  const startingVitals = { hr: 118, sbp: 80, dbp: 46, map: 57, spo2: 96, rhythm: 'Sinus tachycardia' }
+
+  it('reproduces the starting SBP/DBP when MAP is unchanged', () => {
+    expect(deriveBloodPressure(57, startingVitals)).toEqual({ sbp: 80, dbp: 46 })
+  })
+
+  it('shifts both SBP and DBP up as MAP improves, holding pulse pressure constant', () => {
+    const { sbp, dbp } = deriveBloodPressure(65, startingVitals)
+    expect(sbp).toBeGreaterThan(80)
+    expect(dbp).toBeGreaterThan(46)
+    expect(sbp - dbp).toBe(80 - 46) // pulse pressure unchanged
+  })
+
+  it('shifts both down as MAP worsens', () => {
+    const { sbp, dbp } = deriveBloodPressure(50, startingVitals)
+    expect(sbp).toBeLessThan(80)
+    expect(dbp).toBeLessThan(46)
+  })
+})
+
+describe('physiology.accumulateDeterioration', () => {
+  it('accrues proportionally to elapsed minutes', () => {
+    expect(accumulateDeterioration(0, 5, 0.5, 15)).toBe(2.5)
+    expect(accumulateDeterioration(2.5, 5, 0.5, 15)).toBe(5)
+  })
+
+  it('does not accrue further when elapsed is 0 (the caller freezes it this way once treated)', () => {
+    expect(accumulateDeterioration(5, 0, 0.5, 15)).toBe(5)
+  })
+
+  it('caps at maxDrop, never exceeding it regardless of elapsed time', () => {
+    expect(accumulateDeterioration(0, 1000, 0.5, 15)).toBe(15)
+    expect(accumulateDeterioration(14, 100, 0.5, 15)).toBe(15)
+  })
+})
+
+describe('physiology.periodicVariability', () => {
+  it('is zero at minute + phaseOffset === 0', () => {
+    expect(periodicVariability(0, 2.5, 7)).toBe(0)
+    expect(periodicVariability(-3, 4, 11, 3)).toBeCloseTo(0)
+  })
+
+  it('never exceeds the given amplitude in either direction', () => {
+    for (let minute = 0; minute < 50; minute++) {
+      const v = periodicVariability(minute, 2.5, 7)
+      expect(v).toBeGreaterThanOrEqual(-2.5)
+      expect(v).toBeLessThanOrEqual(2.5)
+    }
+  })
+
+  it('is periodic — repeats exactly one full period later', () => {
+    expect(periodicVariability(3, 2.5, 7)).toBeCloseTo(periodicVariability(10, 2.5, 7))
+  })
+
+  it('is deterministic — same inputs always produce the same output', () => {
+    expect(periodicVariability(17, 4, 11, 3)).toBe(periodicVariability(17, 4, 11, 3))
+  })
+
+  it('is exactly repeatable across the same call — not Math.random-based', () => {
+    const a = periodicVariability(5, 2.5, 7)
+    const b = periodicVariability(5, 2.5, 7)
+    const c = periodicVariability(5, 2.5, 7)
+    expect(a).toBe(b)
+    expect(b).toBe(c)
   })
 })

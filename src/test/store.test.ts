@@ -351,6 +351,54 @@ describe('store — physiology wiring', () => {
     useSimStore.getState().advanceClock(5)
     expect(useSimStore.getState().vitals.map).toBeGreaterThanOrEqual(65)
   })
+
+  it('advanceClock derives live SBP/DBP from the new MAP, holding pulse pressure constant', () => {
+    const startingVitals = useSimStore.getState().scenario.startingVitals
+    const startingPulsePressure = startingVitals.sbp - startingVitals.dbp
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
+      lastPhysiologyUpdate: { minute: 0, map: 57 },
+    }))
+    useSimStore.getState().advanceClock(5) // MAP moves from 57 to 63 (norepi alone)
+    const { sbp, dbp, map } = useSimStore.getState().vitals
+    expect(map).toBe(63)
+    expect(sbp).not.toBe(startingVitals.sbp)
+    expect(dbp).not.toBe(startingVitals.dbp)
+    expect(sbp - dbp).toBe(startingPulsePressure)
+  })
+})
+
+describe('store — vitals variability', () => {
+  it('advanceClock layers periodic variability onto HR while MAP stays exact/deterministic', () => {
+    const startingHr = useSimStore.getState().scenario.startingVitals.hr
+    // An infusing infusion keeps deterioration from also moving MAP this tick, so this
+    // test isolates variability's effect from that separate mechanism.
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
+    }))
+    useSimStore.getState().advanceClock(3)
+    const state = useSimStore.getState()
+    // At minute 3 with period 7, phase 0, the jitter is non-zero (not one of the
+    // sine's zero-crossings) — this scenario's exact numbers make this deterministic.
+    expect(state.vitals.hr).not.toBe(startingHr)
+    expect(state.vitals.map).toBe(57) // no lastPhysiologyUpdate anchor yet — drug-response interpolation hasn't started, MAP untouched by variability
+  })
+
+  it('the same clock minute always produces the same HR jitter (deterministic, not random)', () => {
+    useSimStore.getState().advanceClock(9)
+    const first = useSimStore.getState().vitals.hr
+    useSimStore.getState().advanceClock(0) // re-evaluate at the same minute
+    const second = useSimStore.getState().vitals.hr
+    expect(first).toBe(second)
+  })
+
+  it('preserves pulse pressure even with BP variability applied', () => {
+    const startingVitals = useSimStore.getState().scenario.startingVitals
+    const startingPulsePressure = startingVitals.sbp - startingVitals.dbp
+    useSimStore.getState().advanceClock(13)
+    const { sbp, dbp } = useSimStore.getState().vitals
+    expect(sbp - dbp).toBe(startingPulsePressure)
+  })
 })
 
 describe('store — pause and restart', () => {
@@ -477,6 +525,54 @@ describe('store — Block of Charting', () => {
     expect(useSimStore.getState().feedback?.title).not.toBe('Block of Charting exceeds 4 hours')
     useSimStore.getState().advanceClock(1) // total 240
     expect(useSimStore.getState().feedback).toMatchObject({ tone: 'warning', title: 'Block of Charting exceeds 4 hours' })
+  })
+})
+
+describe('store — deterioration', () => {
+  it('keeps the displayed MAP an integer even when the deterioration delta is fractional', () => {
+    useSimStore.getState().advanceClock(5) // 0.5 mmHg/min * 5 min = 2.5, a fractional delta
+    const state = useSimStore.getState()
+    expect(state.deteriorationOffset).toBe(2.5) // the accumulator itself stays exact
+    expect(Number.isInteger(state.vitals.map)).toBe(true)
+    expect(state.vitals.map).toBe(55) // round(57 - 2.5)
+  })
+
+  it('advanceClock declines MAP when no infusion is running, even before any titration', () => {
+    useSimStore.getState().advanceClock(10) // nothing started — norepi is still 'hanging'
+    const state = useSimStore.getState()
+    expect(state.deteriorationOffset).toBe(5) // 0.5 mmHg/min * 10 min
+    expect(state.vitals.map).toBe(52) // 57 baseline - 5
+  })
+
+  it('freezes once an infusion is infusing, even across further clock advances', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0, no untreated time yet
+    expect(useSimStore.getState().deteriorationOffset).toBe(0)
+    useSimStore.getState().advanceClock(20) // infusing throughout — should not deteriorate
+    expect(useSimStore.getState().deteriorationOffset).toBe(0)
+  })
+
+  it('resumes accruing once a previously-infusing infusion is paused', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    useSimStore.getState().advanceClock(10)
+    expect(useSimStore.getState().deteriorationOffset).toBe(0)
+    useSimStore.getState().pauseInfusion(norepiInfusion().id)
+    useSimStore.getState().advanceClock(4)
+    expect(useSimStore.getState().deteriorationOffset).toBe(2) // 0.5 * 4
+  })
+
+  it('caps at the scenario maxDrop regardless of how long it goes untreated', () => {
+    useSimStore.getState().advanceClock(1000)
+    expect(useSimStore.getState().deteriorationOffset).toBe(15)
+  })
+
+  it('surfaces a one-time warning the moment deterioration begins, not on every tick', () => {
+    useSimStore.getState().advanceClock(5)
+    expect(useSimStore.getState().feedback).toMatchObject({ tone: 'warning', title: 'MAP trending down, untreated' })
+    useSimStore.getState().dismissFeedback()
+    useSimStore.getState().advanceClock(5) // still untreated, but not a fresh 0->>0 transition
+    expect(useSimStore.getState().feedback).toBeNull()
   })
 })
 

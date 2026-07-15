@@ -268,6 +268,14 @@ export interface ScenarioConfig {
   priorVitals: PriorVitalsPoint[]
   /** Per-drug MAP response ceilings, keyed by DrugId. */
   responseModel: Partial<Record<DrugId, ResponseModelEntry>>
+  /**
+   * How fast MAP declines while no agent is actively infusing — septic shock doesn't
+   * hold steady untreated. `ratePerMinute` (mmHg/min) accrues every clock tick with
+   * zero infusing infusions; `maxDrop` caps the total so it doesn't run away to
+   * implausible values. Freezes (stops accruing further) the moment any infusion is
+   * infusing again — see engine/physiology.ts's accumulateDeterioration.
+   */
+  deterioration: { ratePerMinute: number; maxDrop: number }
 }
 
 /** The full simulation state (BUILD_BRIEF §8), driven by the Zustand store in state/store.ts. */
@@ -289,6 +297,8 @@ export interface SimState {
    * projected MAP. Null before the first titration.
    */
   lastPhysiologyUpdate: { minute: number; map: number } | null
+  /** Cumulative mmHg MAP has dropped below baseline from untreated time — see ScenarioConfig.deterioration. Monotonically grows toward `maxDrop` while untreated, frozen otherwise. */
+  deteriorationOffset: number
   /** The in-progress Block of Charting episode, if any (CP 4-156's emergent pathway). */
   activeBlockOfCharting: BlockOfChartingRecord | null
   /** Closed Block of Charting episodes this session, for debrief scoring. */

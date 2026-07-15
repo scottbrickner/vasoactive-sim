@@ -4,7 +4,15 @@ import { advance, minutesElapsed } from '../engine/clock'
 import { correctLocationFor } from '../engine/documentation'
 import { evaluateDose, limitsFromOrder } from '../engine/guardrails'
 import { isBlockOverMaxDuration, isPastRemovalThreshold } from '../engine/infusionLifecycle'
-import { projectDoseResponse, projectMap, responseFraction, stepTowardTarget } from '../engine/physiology'
+import {
+  accumulateDeterioration,
+  deriveBloodPressure,
+  periodicVariability,
+  projectDoseResponse,
+  projectMap,
+  responseFraction,
+  stepTowardTarget,
+} from '../engine/physiology'
 import { evaluateTitration, type TitrationAction, type TitrationResult } from '../engine/titrationEngine'
 import { getDrug } from '../data/formulary'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
@@ -191,6 +199,8 @@ interface SimStore {
   verificationFlags: Record<string, boolean>
   adherenceFlags: Record<string, boolean>
   lastPhysiologyUpdate: { minute: number; map: number } | null
+  /** Cumulative mmHg MAP has dropped below baseline from untreated time — see ScenarioConfig.deterioration. */
+  deteriorationOffset: number
   activeBlockOfCharting: BlockOfChartingRecord | null
   blockOfChartingHistory: BlockOfChartingRecord[]
   /** A deferred off-order dose attempt awaiting the training-mode learner's decision. */
@@ -240,6 +250,7 @@ function initialSimFields(scenario: ScenarioConfig, mode: SimMode) {
     verificationFlags: {} as Record<string, boolean>,
     adherenceFlags: {} as Record<string, boolean>,
     lastPhysiologyUpdate: null as { minute: number; map: number } | null,
+    deteriorationOffset: 0,
     activeBlockOfCharting: null as BlockOfChartingRecord | null,
     blockOfChartingHistory: [] as BlockOfChartingRecord[],
     pendingOverride: null as PendingOverride | null,
@@ -594,10 +605,39 @@ export const useSimStore = create<SimStore>((set, get) => ({
       map = stepTowardTarget(state.lastPhysiologyUpdate.map, projectedMap, fraction)
     }
 
+    // Untreated septic shock doesn't hold steady — MAP keeps declining, independent of
+    // (and applied on top of) whatever the drug-response interpolation above produced.
+    // Runs every tick, even before any titration has ever happened (unlike the block
+    // above, which is gated on lastPhysiologyUpdate) — the whole point is that waiting
+    // around without starting treatment has a cost. Freezes (accrues nothing further)
+    // the instant any infusion is infusing again.
+    const anyInfusing = state.infusions.some((i) => i.status === 'infusing')
+    const elapsedTick = minutesElapsed(nextMinute, state.clockMinutes)
+    const nextDeteriorationOffset = anyInfusing
+      ? state.deteriorationOffset
+      : accumulateDeterioration(
+          state.deteriorationOffset,
+          elapsedTick,
+          state.scenario.deterioration.ratePerMinute,
+          state.scenario.deterioration.maxDrop,
+        )
+    // Round after subtracting — `deteriorationOffset` itself stays an exact fractional
+    // accumulator (so per-tick rounding doesn't compound error across many ticks), but
+    // the displayed/charted MAP stays an integer mmHg, matching stepTowardTarget and
+    // deriveBloodPressure elsewhere in this module.
+    map = Math.round(map - (nextDeteriorationOffset - state.deteriorationOffset))
+
     // Derived checks only — this clock never ticks on its own, so there's no live timer
     // to own across windows (see engine/infusionLifecycle.ts's module doc). Default to
     // whatever feedback was already showing; only overwrite it if a rule newly applies.
     let feedback = state.feedback
+    if (state.deteriorationOffset === 0 && nextDeteriorationOffset > 0) {
+      feedback = {
+        tone: 'warning',
+        title: 'MAP trending down, untreated',
+        message: 'No infusion is currently running — without treatment, hemodynamics will continue to decline.',
+      }
+    }
     const overdueInfusion = state.infusions.find(
       (i) => i.status === 'stopped' && i.stoppedAtMinute != null && isPastRemovalThreshold(nextMinute, i.stoppedAtMinute),
     )
@@ -618,11 +658,23 @@ export const useSimStore = create<SimStore>((set, get) => ({
       }
     }
 
-    const nextVitals = { ...state.vitals, map }
+    // Natural beat-to-beat/respiratory variation, layered on top of the clean values
+    // above — deliberately never applied to `map` itself, since every clinical
+    // decision (target-met checks, the deterioration trigger, this function's own
+    // `lastPhysiologyUpdate` interpolation anchor) keys off it; jittering MAP would
+    // make "target reached" flicker tick to tick. HR has no decision logic on its
+    // exact value, so it's safe to jitter directly. SBP/DBP get the SAME jitter value
+    // (a parallel shift) rather than independent jitter each, preserving the pulse
+    // pressure deriveBloodPressure already guarantees.
+    const hr = Math.round(state.scenario.startingVitals.hr + periodicVariability(nextMinute, 2.5, 7))
+    const bpJitter = Math.round(periodicVariability(nextMinute, 4, 11, 3))
+    const { sbp: baseSbp, dbp: baseDbp } = deriveBloodPressure(map, state.scenario.startingVitals)
+    const nextVitals = { ...state.vitals, map, hr, sbp: baseSbp + bpJitter, dbp: baseDbp + bpJitter }
     set({
       clockMinutes: nextMinute,
       vitals: nextVitals,
       vitalsHistory: [...state.vitalsHistory, { minute: nextMinute, vitals: nextVitals }],
+      deteriorationOffset: nextDeteriorationOffset,
       feedback,
     })
   },
