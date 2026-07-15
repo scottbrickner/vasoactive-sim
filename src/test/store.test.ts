@@ -102,7 +102,7 @@ describe('store — titration mechanics', () => {
     const state = useSimStore.getState()
     expect(norepiInfusion().rate).toBe(1)
     expect(norepiInfusion().lastActionMinute).toBe(3)
-    expect(state.feedback).toMatchObject({ tone: 'success', title: 'Titration applied' })
+    expect(state.feedback).toMatchObject({ tone: 'info', title: '3 min have passed' })
   })
 
   it('blocks a dose above the Guardrails hard limit (the drug maximum) regardless of order status', () => {
@@ -196,7 +196,7 @@ describe('store — training/validation mode override flow', () => {
     expect(entry.outcome).toBe('applied')
     expect(entry.overridden).toBe(true)
     expect(state.adherenceFlags[entry.id]).toBe(false)
-    expect(state.feedback).toMatchObject({ tone: 'success', title: 'Titration applied' })
+    expect(state.feedback).toMatchObject({ tone: 'info', title: '3 min have passed' })
   })
 
   it('needs-provider is a hard stop in both modes, never deferred', () => {
@@ -213,6 +213,78 @@ describe('store — training/validation mode override flow', () => {
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 26)
     expect(useSimStore.getState().pendingOverride).toBeNull()
     expect(useSimStore.getState().feedback).toMatchObject({ tone: 'danger', title: 'Not accepted' })
+  })
+})
+
+describe('store — early-notification threshold', () => {
+  beforeEach(() => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0
+    // norepi maxDose 30; threshold 0.3 -> crosses at dose 9. Baseline MAP (57) stays below
+    // the order's target (65) for the whole test since only the infusion rate is seeded
+    // directly here, not run through physiology.
+    useSimStore.setState((s) => ({
+      orders: s.orders.map((o) => (o.id === NOREPI_ORDER_ID ? { ...o, earlyNotificationThreshold: 0.3 } : o)),
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 8.5, lastActionMinute: 0 } : i)),
+      clockMinutes: 3,
+    }))
+  })
+
+  it('marks earlyNotificationDue and fires the notify-prompt the tick the threshold is crossed', () => {
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9) // 8.5 -> 9 crosses 30*0.3=9
+    const state = useSimStore.getState()
+    const entry = state.log.find((e) => e.dose === 9)!
+    expect(entry.earlyNotificationDue).toBe(true)
+    expect(state.feedback).toMatchObject({ tone: 'warning', title: 'Consider notifying the provider' })
+  })
+
+  it('does not refire on a later titration once already past the threshold', () => {
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9)
+    useSimStore.setState({ clockMinutes: 6 })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9.5)
+    const entry = useSimStore.getState().log.find((e) => e.dose === 9.5)!
+    expect(entry.earlyNotificationDue).toBeUndefined()
+  })
+
+  it('is skipped while a Block of Charting is active for this order', () => {
+    useSimStore.setState({
+      activeBlockOfCharting: {
+        id: 'block-1',
+        orderId: NOREPI_ORDER_ID,
+        drugId: 'norepinephrine',
+        startMinute: 3,
+        endMinute: null,
+      },
+    })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9)
+    const entry = useSimStore.getState().log.find((e) => e.dose === 9)!
+    expect(entry.earlyNotificationDue).toBeUndefined()
+  })
+
+  it('is never set on an initiate, even one that would numerically cross a low threshold', () => {
+    useSimStore.getState().startScenario(DEFAULT_SCENARIO, 'training')
+    useSimStore.setState({ phase: 'sim' })
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.setState((s) => ({
+      orders: s.orders.map((o) => (o.id === NOREPI_ORDER_ID ? { ...o, earlyNotificationThreshold: 0.01 } : o)),
+    }))
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate; 30*0.01=0.3, so 0.5 "crosses" it
+    const entry = useSimStore.getState().log.find((e) => e.dose === 0.5)!
+    expect(entry.earlyNotificationDue).toBeUndefined()
+  })
+
+  it('confirmDoseOverride also attaches earlyNotificationDue when the crossed dose applies via override', () => {
+    // 9.5 is off-order (increment should be 0.5 from 8.5, so 9 is the compliant step) --
+    // forces the deferred training-mode override path, whose applied entry needs the same
+    // early-notification detection as submitDose's direct-apply path.
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9.5)
+    expect(useSimStore.getState().pendingOverride).not.toBeNull()
+    useSimStore.getState().confirmDoseOverride()
+    const state = useSimStore.getState()
+    const entry = state.log.find((e) => e.dose === 9.5)!
+    expect(entry.overridden).toBe(true)
+    expect(entry.earlyNotificationDue).toBe(true)
+    expect(state.feedback).toMatchObject({ tone: 'warning', title: 'Consider notifying the provider' })
   })
 })
 

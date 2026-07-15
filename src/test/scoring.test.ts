@@ -110,6 +110,36 @@ describe('scoreSession — needs-provider and notification', () => {
   })
 })
 
+describe('scoreSession — early-notification threshold', () => {
+  it('counts an earlyNotificationDue entry as a needed event, satisfied only by notifying the SPECIFIC order that needs it', () => {
+    const s = useSimStore.getState()
+    s.completeBeginBag(norepiInfusionId())
+    s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate norepi
+    // Seed norepi at vasopressin's activation threshold (1/3 of 30 = 10) so vasopressin unlocks.
+    useSimStore.setState((st) => ({
+      infusions: st.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 10, lastActionMinute: 0 } : i)),
+    }))
+    useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.02) // initiate vasopressin
+    useSimStore.setState((st) => ({
+      orders: st.orders.map((o) => (o.id === VASOPRESSIN_ORDER_ID ? { ...o, earlyNotificationThreshold: 0.75 } : o)),
+      clockMinutes: 30,
+    }))
+    useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.03) // titrate; crosses 0.04*0.75=0.03
+    const entry = useSimStore.getState().log.find((e) => e.dose === 0.03)!
+    expect(entry.earlyNotificationDue).toBe(true)
+    expect(categoryStatus('providerNotification')).toBe('missed')
+
+    // Regression check for the ProviderNotifyControl targeting bug: this event is on
+    // vasopressin (sequence 2), so notifying the WRONG order (norepi, sequence 1 — what
+    // the control used to hardcode) must NOT satisfy it.
+    useSimStore.getState().notifyProvider(NOREPI_ORDER_ID, 'wrong order')
+    expect(categoryStatus('providerNotification')).toBe('missed')
+
+    useSimStore.getState().notifyProvider(VASOPRESSIN_ORDER_ID, 'MAP still low with vasopressin at 0.03')
+    expect(categoryStatus('providerNotification')).toBe('met')
+  })
+})
+
 describe('scoreSession — sequencing violation', () => {
   it('is partial when agent 2 is attempted before activation, but never "missed" (hard-blocked)', () => {
     useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.02)

@@ -13,7 +13,7 @@ import {
   responseFraction,
   stepTowardTarget,
 } from '../engine/physiology'
-import { evaluateTitration, type TitrationAction, type TitrationResult } from '../engine/titrationEngine'
+import { evaluateTitration, meetsTarget, type TitrationAction, type TitrationResult } from '../engine/titrationEngine'
 import { getDrug } from '../data/formulary'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
 import type {
@@ -74,6 +74,28 @@ export function priorAgentsActivationMet(
     const targetUnmet = currentMap < priorOrder.target.value
     return atThreshold && targetUnmet
   })
+}
+
+/**
+ * True the instant a titrate newly crosses `order.earlyNotificationThreshold` (a
+ * fraction of THIS order's own maxDose, distinct from `activationThreshold`'s prior-
+ * order fraction) with target still unmet — a provider-notification checkpoint earlier
+ * than the existing at-max needs-provider trigger. Only true on the crossing tick
+ * (`priorDose` below, `proposedDose` at/above), so it doesn't refire on every
+ * subsequent titration past the threshold.
+ */
+function crossedEarlyNotificationThreshold(order: Order, priorDose: number, proposedDose: number, currentMap: number): boolean {
+  if (order.earlyNotificationThreshold == null) return false
+  const thresholdDose = order.maxDose * order.earlyNotificationThreshold
+  return priorDose < thresholdDose && proposedDose >= thresholdDose && !meetsTarget(currentMap, order.target)
+}
+
+function buildEarlyNotificationFeedback(drug: DrugDefinition, dose: number, order: Order): FeedbackMessage {
+  return {
+    tone: 'warning',
+    title: 'Consider notifying the provider',
+    message: `${drug.name} is now at ${dose} ${drug.unit} — ${order.target.metric} still below target as this order's early-notification checkpoint is reached.`,
+  }
 }
 
 function nextChannelLetter(infusions: Infusion[]): string {
@@ -392,6 +414,14 @@ export const useSimStore = create<SimStore>((set, get) => ({
     const overridden = outcome === 'off-order' ? true : undefined
     const finalOutcome = overridden ? 'applied' : outcome
 
+    // Only meaningful once the dose actually reaches the infusion — never for hard-blocked
+    // or needs-provider attempts, which never applied at this rate.
+    const crossedEarlyThreshold =
+      finalOutcome === 'applied' &&
+      action === 'titrate' &&
+      !blockActive &&
+      crossedEarlyNotificationThreshold(order, infusion?.rate ?? 0, dose, state.vitals.map)
+
     const entry: LogEntry = {
       id: nextId('log'),
       minute: state.clockMinutes,
@@ -406,6 +436,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       guardrailStatus: guardEval.status,
       underBlockOfCharting: blockActive || undefined,
       overridden,
+      earlyNotificationDue: crossedEarlyThreshold || undefined,
     }
 
     // BCMA/I-TRACE verification only runs at Begin Bag / initiation (see Simulation.tsx's
@@ -442,13 +473,29 @@ export const useSimStore = create<SimStore>((set, get) => ({
     // silent override (see `overridden` above).
     set((s) => computeApplyUpdate(s, order, drug, infusion, action, dose))
 
-    set({
-      feedback: {
-        tone: 'success',
-        title: action === 'initiate' ? 'Infusion started' : 'Titration applied',
-        message: `${drug.name} now at ${dose} ${drug.unit}.`,
-      },
-    })
+    // Feedback precedence: the early-notification checkpoint (if newly crossed) wins
+    // over the routine post-titrate prompt, which itself replaces the old generic
+    // "Titration applied" — naming the interval and prompting reassessment rather than
+    // just confirming the dose landed. Initiate keeps its own distinct message (it's
+    // not itself an interval to reassess after). advanceClock's own more-urgent
+    // overrides (2hr-stopped, 4hr-block, deterioration-started) still get final say,
+    // unchanged, since it runs after this and only overwrites `feedback` when one of
+    // those newly applies.
+    if (crossedEarlyThreshold) {
+      set({ feedback: buildEarlyNotificationFeedback(drug, dose, order) })
+    } else if (action === 'titrate') {
+      set({
+        feedback: {
+          tone: 'info',
+          title: `${order.interval.minMinutes} min have passed`,
+          message: `${drug.name} now at ${dose} ${drug.unit}. Chart vitals and reassess before your next titration.`,
+        },
+      })
+    } else {
+      set({
+        feedback: { tone: 'success', title: 'Infusion started', message: `${drug.name} now at ${dose} ${drug.unit}.` },
+      })
+    }
 
     // Titrating implies time has passed for reassessment; initiating is the start of
     // observation, not itself an interval. A facilitator-driven-vs-auto pacing toggle
@@ -468,6 +515,10 @@ export const useSimStore = create<SimStore>((set, get) => ({
     const drug = getDrug(order.drugId)
     const infusion = state.infusions.find((i) => i.orderId === pending.orderId) ?? null
 
+    const crossedEarlyThreshold =
+      pending.action === 'titrate' &&
+      crossedEarlyNotificationThreshold(order, infusion?.rate ?? 0, pending.dose, state.vitals.map)
+
     const entry: LogEntry = {
       id: nextId('log'),
       minute: state.clockMinutes,
@@ -481,6 +532,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       violations: pending.violations,
       guardrailStatus: pending.guardrailStatus,
       overridden: true,
+      earlyNotificationDue: crossedEarlyThreshold || undefined,
     }
 
     set((s) => ({
@@ -492,13 +544,19 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
     set((s) => computeApplyUpdate(s, order, drug, infusion, pending.action, pending.dose))
 
-    set({
-      feedback: {
-        tone: 'warning',
-        title: 'Applied via override',
-        message: `${drug.name} now at ${pending.dose} ${drug.unit} — logged as an override for debrief.`,
-      },
-    })
+    // Same precedence as submitDose's applied path: the early-notification checkpoint,
+    // if newly crossed, wins over the routine "applied via override" confirmation.
+    if (crossedEarlyThreshold) {
+      set({ feedback: buildEarlyNotificationFeedback(drug, pending.dose, order) })
+    } else {
+      set({
+        feedback: {
+          tone: 'warning',
+          title: 'Applied via override',
+          message: `${drug.name} now at ${pending.dose} ${drug.unit} — logged as an override for debrief.`,
+        },
+      })
+    }
 
     if (pending.action === 'titrate') get().advanceClock(order.interval.minMinutes)
   },

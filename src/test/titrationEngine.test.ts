@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { deriveActivationText } from '../engine/activation'
-import { evaluateTitration } from '../engine/titrationEngine'
+import { evaluateTitration, meetsTarget } from '../engine/titrationEngine'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
 import type { Order } from '../state/types'
 
@@ -171,5 +171,19 @@ describe('titrationEngine — multi-agent sequence', () => {
     expect(result.sequence).toBe(1)
     const evaluated = base({ priorAgentActivationMet: false })
     expect(evaluated.status).toBe('ok')
+  })
+})
+
+// store.ts's early-notification-threshold detection reuses this exact comparator so the
+// "crossed the threshold with target still unmet" check can never drift from the target-
+// met check evaluateTitration itself uses (see engine/titrationEngine.ts's doc comment).
+describe('titrationEngine — meetsTarget', () => {
+  it('is false below the target value', () => {
+    expect(meetsTarget(belowTargetMap, norepiOrder.target)).toBe(false)
+  })
+
+  it('is true at or above the target value', () => {
+    expect(meetsTarget(atTargetMap, norepiOrder.target)).toBe(true)
+    expect(meetsTarget(atTargetMap + 5, norepiOrder.target)).toBe(true)
   })
 })

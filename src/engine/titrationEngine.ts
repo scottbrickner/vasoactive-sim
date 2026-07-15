@@ -48,7 +48,7 @@ function nearlyEqual(a: number, b: number): boolean {
   return Math.abs(a - b) < EPSILON
 }
 
-function meetsTarget(currentValue: number, target: TitrationTarget): boolean {
+export function meetsTarget(currentValue: number, target: TitrationTarget): boolean {
   switch (target.comparator) {
     case '>=':
       return currentValue >= target.value

@@ -173,9 +173,12 @@ export function scoreSession(input: ScoringInput): Scorecard {
     })
   }
 
-  // 6. Provider notification correctness.
+  // 6. Provider notification correctness. Covers two independent triggers: the
+  // hard-stop needs-provider outcome (dose exceeds order max, target unmet), and the
+  // softer early-notification checkpoint (order.earlyNotificationThreshold newly
+  // crossed, target still unmet) — same satisfied-by-later-notification check for both.
   {
-    const neededEvents = doseEntries.filter((e) => e.outcome === 'needs-provider')
+    const neededEvents = doseEntries.filter((e) => e.outcome === 'needs-provider' || e.earlyNotificationDue)
     const notifications = log.filter((e) => e.isProviderNotification)
     const satisfied = neededEvents.filter((e) =>
       notifications.some((n) => n.orderId === e.orderId && n.minute >= e.minute),

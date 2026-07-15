@@ -18,7 +18,7 @@ import { SubmitConfirmPanel } from '../SubmitConfirmPanel'
 import { ProviderNotifyControl } from '../ProviderNotifyControl'
 import { BlockOfChartingControl } from '../BlockOfChartingControl'
 import { TitrationTimeline } from '../TitrationTimeline'
-import type { Infusion, Order } from '../../state/types'
+import type { Infusion, LogEntry, Order } from '../../state/types'
 
 /**
  * BCMA/I-TRACE verification is only required for a new dose entering play (Begin Bag,
@@ -61,6 +61,25 @@ function buildOverrideTitle(pending: PendingOverride, orders: Order[]): string {
   const order = orders.find((o) => o.id === pending.orderId)
   const drug = order ? getDrug(order.drugId) : null
   return `${drug?.name ?? ''} — ${pending.dose} ${drug?.unit ?? ''}`
+}
+
+/**
+ * Which order "Notify provider" should target — whichever order has an outstanding
+ * needs-provider or early-notification event (mirrors scoring.ts category 6's
+ * satisfied-by-later-notification check, so the button and the scorecard agree on what
+ * counts as satisfied), falling back to sequence 1 when nothing is outstanding. Fixes a
+ * real bug: this used to always hardcode sequence 1, so a needs-provider/early-
+ * notification event on any later-sequence order could never be satisfied no matter
+ * what the learner did.
+ */
+function findOutstandingNotificationOrderId(log: LogEntry[], orders: Order[]): string | undefined {
+  const neededEvents = log.filter((e) => e.type === 'action' && (e.outcome === 'needs-provider' || e.earlyNotificationDue))
+  const notifications = log.filter((e) => e.isProviderNotification)
+  const outstanding = neededEvents.filter(
+    (e) => !notifications.some((n) => n.orderId === e.orderId && n.minute >= e.minute),
+  )
+  const mostRecent = outstanding[outstanding.length - 1]
+  return mostRecent?.orderId ?? orders.find((o) => o.sequence === 1)?.id
 }
 
 const CLOCK_ADVANCE_OPTIONS = [3, 5, 30]
@@ -217,8 +236,8 @@ export function Simulation() {
           <ProviderNotifyControl
             disabled={locked}
             onNotify={(reason) => {
-              const primaryOrder = orders.find((o) => o.sequence === 1)
-              if (primaryOrder) notifyProvider(primaryOrder.id, reason)
+              const targetOrderId = findOutstandingNotificationOrderId(log, orders)
+              if (targetOrderId) notifyProvider(targetOrderId, reason)
             }}
           />
         </div>

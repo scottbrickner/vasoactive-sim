@@ -110,6 +110,13 @@ export interface Order {
    * `activatesWhen` from this so the display text can't drift from the real threshold.
    */
   activationThreshold?: number
+  /**
+   * Fraction (0,1] of **this order's own** maxDose — distinct from `activationThreshold`,
+   * which is about the PRIOR order — that requires provider notification once reached
+   * with target still unmet. A checkpoint earlier than the existing needs-provider-at-max
+   * trigger; omit to leave this order without an early-notification requirement.
+   */
+  earlyNotificationThreshold?: number
 }
 
 export type InfusionStatus = 'hanging' | 'infusing' | 'stopped'
@@ -213,6 +220,8 @@ export interface LogEntry {
   retrospective?: boolean
   /** For a retrospective entry: the real clock minute it was actually CREATED at, distinct from `minute` (the minute it documents). Absent for live entries, where the two are always equal. */
   enteredAtMinute?: number
+  /** True on a dose-entry action entry that newly crossed its order's `earlyNotificationThreshold` this tick, with target still unmet — a second provider-notification trigger alongside `outcome === 'needs-provider'` (see scoring.ts category 6). */
+  earlyNotificationDue?: boolean
 }
 
 /**
