@@ -163,6 +163,23 @@ describe('scoreSession — Block of Charting', () => {
   })
 })
 
+describe('scoreSession — retrospective charting', () => {
+  it('a backdated chartRetrospective entry satisfies the same cadence checkpoint a live chartVitals would', () => {
+    const s = useSimStore.getState()
+    s.completeBeginBag(norepiInfusionId())
+    s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0, nothing charted live
+    s.advanceClock(10) // t=10, no charting yet — documentation would otherwise be 'missed'
+    s.chartRetrospective(0) // backdate the initiation checkpoint to when it actually happened
+    // documentation.ts's checkCadence reads only the entry's `minute` (0), not
+    // `enteredAtMinute` (10) — confirms a backdated entry integrates exactly like a
+    // live one, with zero scoring.ts changes needed.
+    expect(categoryStatus('documentation')).toBe('partial') // initiation met, +30Start not yet due
+    const card = score()
+    const doc = card.categories.find((c) => c.key === 'documentation')!
+    expect(doc.detail).toMatch(/1 of 2/)
+  })
+})
+
 describe('scoreSession — no activity at all', () => {
   it('reports n/a categories and a null overall percent', () => {
     const card = score()

@@ -14,8 +14,10 @@ import {
 } from '../../devices'
 import { VerificationPanel } from '../VerificationPanel'
 import { OverrideConfirmPanel } from '../OverrideConfirmPanel'
+import { SubmitConfirmPanel } from '../SubmitConfirmPanel'
 import { ProviderNotifyControl } from '../ProviderNotifyControl'
 import { BlockOfChartingControl } from '../BlockOfChartingControl'
+import { TitrationTimeline } from '../TitrationTimeline'
 import type { Infusion, Order } from '../../state/types'
 
 /**
@@ -72,17 +74,20 @@ const CLOCK_ADVANCE_OPTIONS = [3, 5, 30]
 export function Simulation() {
   const setPhase = useSimStore((s) => s.setPhase)
   const scenario = useSimStore((s) => s.scenario)
+  const mode = useSimStore((s) => s.mode)
   const clockMinutes = useSimStore((s) => s.clockMinutes)
   const infusions = useSimStore((s) => s.infusions)
   const vitals = useSimStore((s) => s.vitals)
   const orders = useSimStore((s) => s.orders)
   const log = useSimStore((s) => s.log)
+  const vitalsHistory = useSimStore((s) => s.vitalsHistory)
   const feedback = useSimStore((s) => s.feedback)
   const dismissFeedback = useSimStore((s) => s.dismissFeedback)
   const completeBeginBag = useSimStore((s) => s.completeBeginBag)
   const submitDose = useSimStore((s) => s.submitDose)
   const notifyProvider = useSimStore((s) => s.notifyProvider)
   const chartVitals = useSimStore((s) => s.chartVitals)
+  const chartRetrospective = useSimStore((s) => s.chartRetrospective)
   const advanceClock = useSimStore((s) => s.advanceClock)
   const pauseInfusion = useSimStore((s) => s.pauseInfusion)
   const restartInfusion = useSimStore((s) => s.restartInfusion)
@@ -95,6 +100,7 @@ export function Simulation() {
   const cancelDoseOverride = useSimStore((s) => s.cancelDoseOverride)
 
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
+  const [showSubmitConfirm, setShowSubmitConfirm] = useState(false)
   const locked = pendingAction !== null || pendingOverride !== null
 
   const channels: PumpChannelInfo[] = [...orders]
@@ -112,13 +118,18 @@ export function Simulation() {
 
   const chartedEntries: ChartedVitalsEntry[] = log
     .filter((e) => e.type === 'documentation' && e.location === 'iView' && e.vitalsSnapshot)
-    .map((e) => ({ minute: e.minute, vitals: e.vitalsSnapshot! }))
+    .map((e) => ({ minute: e.minute, vitals: e.vitalsSnapshot!, retrospective: e.retrospective }))
 
   function handleConfirm() {
     if (!pendingAction) return
     if (pendingAction.kind === 'beginBag') completeBeginBag(pendingAction.infusionId)
     else submitDose(pendingAction.orderId, pendingAction.dose)
     setPendingAction(null)
+  }
+
+  function handleEndClick() {
+    if (mode === 'validation') setShowSubmitConfirm(true)
+    else setPhase('debrief')
   }
 
   const pendingInfo = pendingAction ? buildPendingInfo(pendingAction, infusions, orders) : null
@@ -154,6 +165,16 @@ export function Simulation() {
           reasons={pendingOverride.reasons}
           onOverride={confirmDoseOverride}
           onCancel={cancelDoseOverride}
+        />
+      )}
+
+      {showSubmitConfirm && (
+        <SubmitConfirmPanel
+          onConfirm={() => {
+            setShowSubmitConfirm(false)
+            setPhase('debrief')
+          }}
+          onCancel={() => setShowSubmitConfirm(false)}
         />
       )}
 
@@ -215,6 +236,12 @@ export function Simulation() {
             canChartNow={!locked}
             onChartNow={chartVitals}
           />
+          <TitrationTimeline
+            log={log}
+            vitalsHistory={vitalsHistory}
+            disabled={locked}
+            onChartRetrospective={chartRetrospective}
+          />
         </div>
       </div>
 
@@ -222,7 +249,7 @@ export function Simulation() {
         <Button variant="ghost" onClick={() => setPhase('intro')}>
           Back to intro
         </Button>
-        <Button onClick={() => setPhase('debrief')}>End &amp; go to debrief</Button>
+        <Button onClick={handleEndClick}>End &amp; go to debrief</Button>
       </div>
     </div>
   )

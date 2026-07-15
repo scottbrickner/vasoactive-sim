@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { alaris } from '../../design/deviceTokens'
-import { Button } from '../../design/primitives'
+import { Button, InlineConfirm } from '../../design/primitives'
 import { isPastRemovalThreshold, minutesStopped } from '../../engine/infusionLifecycle'
 import type { DrugDefinition, Infusion, Order } from '../../state/types'
 
@@ -113,6 +113,14 @@ function PumpChannel({
   const { order, drug, infusion, isActivated } = info
   const status = channelStatus(info)
   const [doseInput, setDoseInput] = useState('')
+  // Inline "yes, that went through" tags — complement, not replace, the page-level
+  // Toast (which already covers initiate/Program via VerificationPanel's confirm flow).
+  const [confirmTick, setConfirmTick] = useState<number | null>(null)
+  const [confirmMessage, setConfirmMessage] = useState('')
+  const fireConfirm = (message: string) => {
+    setConfirmMessage(message)
+    setConfirmTick((t) => (t ?? 0) + 1)
+  }
 
   if (!infusion && !isActivated) {
     return (
@@ -166,12 +174,30 @@ function PumpChannel({
 
       {paused && infusion ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button size="sm" disabled={disabled} onClick={() => onRestart(infusion.id)}>
+          <Button
+            size="sm"
+            disabled={disabled}
+            onClick={() => {
+              onRestart(infusion.id)
+              fireConfirm('Restarted')
+            }}
+          >
             Restart at {infusion.rateBeforePause} {drug.unit}
           </Button>
-          <Button size="sm" variant="ghost" className="border" style={DEVICE_GHOST_STYLE} disabled={disabled} onClick={() => onDiscontinue(infusion.id)}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="border"
+            style={DEVICE_GHOST_STYLE}
+            disabled={disabled}
+            onClick={() => {
+              onDiscontinue(infusion.id)
+              fireConfirm('Discontinued')
+            }}
+          >
             Discontinue
           </Button>
+          <InlineConfirm trigger={confirmTick} message={confirmMessage} />
         </div>
       ) : (
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -196,6 +222,7 @@ function PumpChannel({
             onClick={() => {
               if (infusion?.status === 'infusing') {
                 onTitrate(order.id, parsed)
+                fireConfirm(`Titrated to ${parsed}`)
               } else {
                 onRequestProgram(order.id, parsed)
               }
@@ -205,15 +232,36 @@ function PumpChannel({
             {infusion?.status === 'infusing' ? 'Titrate' : 'Program'}
           </Button>
           {infusion?.status === 'infusing' && (
-            <Button size="sm" variant="ghost" className="border" style={DEVICE_GHOST_STYLE} disabled={disabled} onClick={() => onPause(infusion.id)}>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="border"
+              style={DEVICE_GHOST_STYLE}
+              disabled={disabled}
+              onClick={() => {
+                onPause(infusion.id)
+                fireConfirm('Paused')
+              }}
+            >
               Pause
             </Button>
           )}
           {infusion && (
-            <Button size="sm" variant="ghost" className="border" style={DEVICE_GHOST_STYLE} disabled={disabled} onClick={() => onDiscontinue(infusion.id)}>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="border"
+              style={DEVICE_GHOST_STYLE}
+              disabled={disabled}
+              onClick={() => {
+                onDiscontinue(infusion.id)
+                fireConfirm('Discontinued')
+              }}
+            >
               Discontinue
             </Button>
           )}
+          <InlineConfirm trigger={confirmTick} message={confirmMessage} />
         </div>
       )}
     </div>

@@ -1,11 +1,14 @@
+import { useState } from 'react'
 import { cerner } from '../../design/deviceTokens'
-import { Button } from '../../design/primitives'
+import { Button, InlineConfirm } from '../../design/primitives'
 import { formatClock, formatRelativeMinutes } from '../../lib/time'
 import type { PriorVitalsPoint, VitalSigns } from '../../state/types'
 
 export interface ChartedVitalsEntry {
   minute: number
   vitals: VitalSigns
+  /** True when this entry was backdated via the titration timeline rather than charted live. */
+  retrospective?: boolean
 }
 
 export interface CernerIViewProps {
@@ -41,13 +44,17 @@ export function CernerIView({
   onChartNow,
   canChartNow,
 }: CernerIViewProps) {
+  const [confirmTick, setConfirmTick] = useState<number | null>(null)
   const historicalColumns = [...priorVitals]
     .sort((a, b) => b.minutesBeforeStart - a.minutesBeforeStart)
     .map((p) => ({ label: formatRelativeMinutes(p.minutesBeforeStart), vitals: p.vitals }))
   const startColumn = { label: formatClock(0), vitals: startingVitals }
   const liveColumns = [...chartedEntries]
     .sort((a, b) => a.minute - b.minute)
-    .map((e) => ({ label: formatClock(e.minute), vitals: e.vitals }))
+    .map((e) => ({
+      label: e.retrospective ? `${formatClock(e.minute)} (backdated)` : formatClock(e.minute),
+      vitals: e.vitals,
+    }))
   const columns = [...historicalColumns, startColumn, ...liveColumns]
 
   return (
@@ -93,10 +100,21 @@ export function CernerIView({
           </tbody>
         </table>
       </div>
-      <div className="border-t px-3 py-2" style={{ borderColor: cerner.gridLine, backgroundColor: cerner.surfaceAlt }}>
-        <Button size="sm" disabled={!canChartNow} onClick={onChartNow}>
+      <div
+        className="flex items-center gap-2 border-t px-3 py-2"
+        style={{ borderColor: cerner.gridLine, backgroundColor: cerner.surfaceAlt }}
+      >
+        <Button
+          size="sm"
+          disabled={!canChartNow}
+          onClick={() => {
+            onChartNow()
+            setConfirmTick((t) => (t ?? 0) + 1)
+          }}
+        >
           Chart now
         </Button>
+        <InlineConfirm trigger={confirmTick} message="Charted" />
       </div>
     </div>
   )

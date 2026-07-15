@@ -490,3 +490,54 @@ describe('store — documentation', () => {
     expect(state.feedback).toMatchObject({ tone: 'success', title: 'Charted' })
   })
 })
+
+describe('store — vitalsHistory and retrospective charting', () => {
+  it('seeds vitalsHistory with the starting vitals at minute 0', () => {
+    expect(useSimStore.getState().vitalsHistory).toEqual([{ minute: 0, vitals: DEFAULT_SCENARIO.startingVitals }])
+  })
+
+  it('advanceClock appends a new vitalsHistory entry each time', () => {
+    useSimStore.getState().advanceClock(5)
+    useSimStore.getState().advanceClock(5)
+    const history = useSimStore.getState().vitalsHistory
+    expect(history.map((h) => h.minute)).toEqual([0, 5, 10])
+  })
+
+  it('chartRetrospective backdates an entry using the vitals snapshot from that minute', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // t=0
+    useSimStore.getState().advanceClock(10) // t=10, new vitalsHistory entry
+    const vitalsAtTen = useSimStore.getState().vitals
+    useSimStore.getState().advanceClock(5) // t=15 — current vitals now differ from t=10's
+
+    useSimStore.getState().chartRetrospective(10)
+    const state = useSimStore.getState()
+    const entry = state.log.find((e) => e.type === 'documentation' && e.minute === 10)!
+    expect(entry.retrospective).toBe(true)
+    expect(entry.enteredAtMinute).toBe(15)
+    expect(entry.vitalsSnapshot).toEqual(vitalsAtTen)
+    expect(state.feedback).toMatchObject({ tone: 'success', title: 'Charted' })
+  })
+
+  it('falls back to the closest prior vitalsHistory entry when the exact minute has no snapshot', () => {
+    useSimStore.getState().advanceClock(10) // vitalsHistory: [0, 10]
+    const vitalsAtTen = useSimStore.getState().vitals
+    useSimStore.getState().advanceClock(10) // vitalsHistory: [0, 10, 20]
+
+    useSimStore.getState().chartRetrospective(15) // no exact entry for 15 — falls back to 10
+    const entry = useSimStore.getState().log.find((e) => e.type === 'documentation' && e.minute === 15)!
+    expect(entry.vitalsSnapshot).toEqual(vitalsAtTen)
+  })
+
+  it('does nothing when asked to chart a future minute', () => {
+    useSimStore.getState().chartRetrospective(999)
+    expect(useSimStore.getState().log.some((e) => e.minute === 999)).toBe(false)
+  })
+
+  it('a live chartVitals entry is not marked retrospective', () => {
+    useSimStore.getState().chartVitals()
+    const entry = useSimStore.getState().log.find((e) => e.type === 'documentation')!
+    expect(entry.retrospective).toBeUndefined()
+    expect(entry.enteredAtMinute).toBeUndefined()
+  })
+})

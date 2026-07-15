@@ -209,6 +209,10 @@ export interface LogEntry {
    * needs-provider/hardLimitBlocked entries — those never apply in either mode.
    */
   overridden?: boolean
+  /** True when this documentation entry was backdated to a past minute via chartRetrospective, rather than charted live. */
+  retrospective?: boolean
+  /** For a retrospective entry: the real clock minute it was actually CREATED at, distinct from `minute` (the minute it documents). Absent for live entries, where the two are always equal. */
+  enteredAtMinute?: number
 }
 
 /**
@@ -289,4 +293,11 @@ export interface SimState {
   activeBlockOfCharting: BlockOfChartingRecord | null
   /** Closed Block of Charting episodes this session, for debrief scoring. */
   blockOfChartingHistory: BlockOfChartingRecord[]
+  /**
+   * Snapshot of live vitals at each sim minute reached (start + every advanceClock),
+   * kept so a nurse can backdate a chart entry to what genuinely happened at that
+   * moment (see chartRetrospective) — auto-filled, never freely entered or graded on
+   * recall.
+   */
+  vitalsHistory: { minute: number; vitals: VitalSigns }[]
 }

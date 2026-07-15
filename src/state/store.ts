@@ -19,6 +19,7 @@ import type {
   ScenarioConfig,
   SimMode,
   TitrationViolations,
+  VitalSigns,
 } from './types'
 
 export type FeedbackTone = 'info' | 'success' | 'warning' | 'danger'
@@ -156,6 +157,28 @@ function computeApplyUpdate(
   }
 }
 
+/**
+ * Shared iView chart-entry construction, used by both a live chartVitals() and a
+ * backdated chartRetrospective() — so the two LogEntry shapes can't drift apart.
+ * `enteredAtMinute` is the real clock minute of creation; passing one that differs
+ * from `forMinute` is what makes an entry retrospective.
+ */
+function buildVitalsLogEntry(forMinute: number, vitals: VitalSigns, enteredAtMinute: number): LogEntry {
+  const retrospective = enteredAtMinute !== forMinute
+  return {
+    id: nextId('log'),
+    minute: forMinute,
+    type: 'documentation',
+    location: 'iView',
+    summary: retrospective
+      ? `Measurable criteria charted in iView for ${forMinute} min (entered retrospectively at ${enteredAtMinute} min): MAP ${vitals.map} mmHg, HR ${vitals.hr}.`
+      : `Measurable criteria charted in iView: MAP ${vitals.map} mmHg, HR ${vitals.hr}.`,
+    vitalsSnapshot: vitals,
+    retrospective: retrospective || undefined,
+    enteredAtMinute: retrospective ? enteredAtMinute : undefined,
+  }
+}
+
 interface SimStore {
   phase: Phase
   mode: SimMode
@@ -172,6 +195,8 @@ interface SimStore {
   blockOfChartingHistory: BlockOfChartingRecord[]
   /** A deferred off-order dose attempt awaiting the training-mode learner's decision. */
   pendingOverride: PendingOverride | null
+  /** Snapshot of live vitals at each sim minute reached — see chartRetrospective. */
+  vitalsHistory: { minute: number; vitals: ScenarioConfig['startingVitals'] }[]
   feedback: FeedbackMessage | null
 
   setPhase: (phase: Phase) => void
@@ -188,6 +213,8 @@ interface SimStore {
   cancelDoseOverride: () => void
   notifyProvider: (orderId: string, reason?: string) => void
   chartVitals: () => void
+  /** Backdates a chart entry to a past minute, auto-filling the vitals actually recorded then (vitalsHistory) — never freely entered or graded on recall. */
+  chartRetrospective: (forMinute: number) => void
   advanceClock: (byMinutes: number) => void
 
   /** Stops an infusing infusion. Not verification-gated — no drug identity/dose is being administered. */
@@ -216,6 +243,7 @@ function initialSimFields(scenario: ScenarioConfig, mode: SimMode) {
     activeBlockOfCharting: null as BlockOfChartingRecord | null,
     blockOfChartingHistory: [] as BlockOfChartingRecord[],
     pendingOverride: null as PendingOverride | null,
+    vitalsHistory: [{ minute: 0, vitals: { ...scenario.startingVitals } }],
     feedback: null as FeedbackMessage | null,
   }
 }
@@ -521,17 +549,30 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
   chartVitals: () => {
     const state = get()
-    const entry: LogEntry = {
-      id: nextId('log'),
-      minute: state.clockMinutes,
-      type: 'documentation',
-      location: 'iView',
-      summary: `Measurable criteria charted in iView: MAP ${state.vitals.map} mmHg, HR ${state.vitals.hr}.`,
-      vitalsSnapshot: state.vitals,
-    }
+    const entry = buildVitalsLogEntry(state.clockMinutes, state.vitals, state.clockMinutes)
     set((s) => ({
       log: [...s.log, entry],
       feedback: { tone: 'success', title: 'Charted', message: 'Vitals recorded in iView.' },
+    }))
+  },
+
+  chartRetrospective: (forMinute) => {
+    const state = get()
+    if (forMinute < 0 || forMinute > state.clockMinutes) return
+    // Closest snapshot at or before the requested minute — auto-filled, never freely
+    // entered (see the type's doc comment: this isn't graded on recall).
+    const candidate = state.vitalsHistory
+      .filter((h) => h.minute <= forMinute)
+      .reduce((best, h) => (best == null || h.minute > best.minute ? h : best), null as { minute: number; vitals: VitalSigns } | null)
+    if (!candidate) return
+    const entry = buildVitalsLogEntry(forMinute, candidate.vitals, state.clockMinutes)
+    set((s) => ({
+      log: [...s.log, entry],
+      feedback: {
+        tone: 'success',
+        title: 'Charted',
+        message: `Vitals recorded in iView for minute ${forMinute} (backdated).`,
+      },
     }))
   },
 
@@ -577,7 +618,13 @@ export const useSimStore = create<SimStore>((set, get) => ({
       }
     }
 
-    set({ clockMinutes: nextMinute, vitals: { ...state.vitals, map }, feedback })
+    const nextVitals = { ...state.vitals, map }
+    set({
+      clockMinutes: nextMinute,
+      vitals: nextVitals,
+      vitalsHistory: [...state.vitalsHistory, { minute: nextMinute, vitals: nextVitals }],
+      feedback,
+    })
   },
 
   pauseInfusion: (infusionId) => {
