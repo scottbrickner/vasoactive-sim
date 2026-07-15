@@ -178,6 +178,27 @@ describe('titrationEngine — multi-agent sequence', () => {
     const evaluated = base({ priorAgentActivationMet: false })
     expect(evaluated.status).toBe('ok')
   })
+
+  // Regression: the sequence-activation gate must never fire on a titrate, only an
+  // initiate — otherwise an already-infusing sequence>1 agent becomes permanently
+  // unblockable (including for down-titration) the instant its target is met and
+  // priorAgentActivationMet's own targetUnmet condition flips false (see engine/
+  // titrationEngine.ts's doc comment). Surfaced by the weaning scenario, where
+  // sequence>1 agents are pre-seeded already-infusing with MAP already above target.
+  it('does not gate a titrate on a sequence > 1 agent even when priorAgentActivationMet is false', () => {
+    const result = evaluateTitration({
+      action: 'titrate',
+      order: vasopressinOrder,
+      currentDose: 0.03,
+      proposedDose: 0.02,
+      currentMinute: 30,
+      lastActionMinute: 0,
+      currentMap: atTargetMap,
+      priorAgentActivationMet: false,
+      priorAgentsWeaned: true,
+    })
+    expect(result.status).toBe('ok')
+  })
 })
 
 describe('titrationEngine — weaning order', () => {

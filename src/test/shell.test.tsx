@@ -22,9 +22,11 @@ describe('app shell', () => {
     expect(within(status).getByText('Sim time')).toBeInTheDocument()
     expect(within(status).getByText('00:00')).toBeInTheDocument()
     expect(within(status).getByText('Current MAP')).toBeInTheDocument()
-    expect(within(status).getByText('—')).toBeInTheDocument() // MAP null before sim starts
     expect(within(status).getByText('Target MAP')).toBeInTheDocument()
-    expect(within(status).getByText('≥ 65')).toBeInTheDocument()
+    // Both blank before the sim starts — the intro screen hasn't picked (and may
+    // randomize away from) the last-loaded scenario, so showing its stale target would
+    // misrepresent the upcoming one (see Header.tsx).
+    expect(within(status).getAllByText('—')).toHaveLength(2)
   })
 
   it('starts on the Scenario Intro screen', () => {

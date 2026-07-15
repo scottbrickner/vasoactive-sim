@@ -1,6 +1,5 @@
 import { Button, Panel } from '../../design/primitives'
 import { useSimStore } from '../../state/store'
-import { DEFAULT_SCENARIO } from '../../data/scenarios'
 import { scoreSession, type ScoreStatus } from '../../engine/scoring'
 import { DocumentationReview } from '../../devices'
 
@@ -18,7 +17,6 @@ const STATUS_STYLE: Record<ScoreStatus, { label: string; className: string }> = 
  * opportunities are specific and policy-cited rather than a wall of red.
  */
 export function Debrief() {
-  const startScenario = useSimStore((s) => s.startScenario)
   const setPhase = useSimStore((s) => s.setPhase)
   const orders = useSimStore((s) => s.orders)
   const infusions = useSimStore((s) => s.infusions)
@@ -30,9 +28,8 @@ export function Debrief() {
   const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory })
 
   const handleRestart = () => {
-    // Restarting returns to the intro screen, where the learner picks a mode again —
-    // this default is only ever visible for the instant before ScenarioIntro re-mounts.
-    startScenario(DEFAULT_SCENARIO, 'training')
+    // ScenarioIntro owns its own random scenario pick (see that file) and calls
+    // startScenario itself once the learner clicks "Begin simulation" again.
     setPhase('intro')
   }
 

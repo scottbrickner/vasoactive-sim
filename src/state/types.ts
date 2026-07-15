@@ -23,8 +23,8 @@ export interface HeaderReadout {
   clockMinutes: number
   /** Current mean arterial pressure (mmHg), or null before the sim starts. */
   currentMap: number | null
-  /** Target MAP for the scenario (mmHg). */
-  targetMap: number
+  /** Target MAP for the scenario (mmHg), or null before a scenario has been picked (intro phase). */
+  targetMap: number | null
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +294,10 @@ export interface ScenarioConfig {
    * infusing again — see engine/physiology.ts's accumulateDeterioration.
    */
   deterioration: { ratePerMinute: number; maxDrop: number }
+  /** One-line learning objective shown on the intro screen — what the learner is being asked to demonstrate. */
+  objective: string
+  /** Whether this scenario's emergent Block of Charting pathway (CP 4-156) is in scope — false for scenarios with a narrower teaching focus. */
+  enableBlockOfCharting: boolean
 }
 
 /** The full simulation state (BUILD_BRIEF §8), driven by the Zustand store in state/store.ts. */

@@ -29,13 +29,16 @@ export function Header() {
   const clockMinutes = useSimStore((s) => s.clockMinutes)
   const map = useSimStore((s) => s.vitals.map)
   const orders = useSimStore((s) => s.orders)
-  const targetMap = orders.find((o) => o.sequence === 1)?.target.value ?? 0
+  const targetMap = orders.find((o) => o.sequence === 1)?.target.value ?? null
 
   const header: HeaderReadout = {
     clockMinutes,
     // No live vitals to show until the sim actually starts.
     currentMap: phase === 'intro' ? null : map,
-    targetMap,
+    // The intro screen picks its own random scenario, independent of the store's
+    // last-loaded one — showing that stale target here would misleadingly suggest it's
+    // the upcoming scenario's goal. Blank it until the sim actually starts.
+    targetMap: phase === 'intro' ? null : targetMap,
   }
 
   return (
@@ -71,7 +74,7 @@ function HeaderStats({ header }: { header: HeaderReadout }) {
         emphasis
       />
       <div className="h-8 w-px bg-white/20" aria-hidden="true" />
-      <Stat label="Target MAP" value={`≥ ${header.targetMap}`} unit="mmHg" />
+      <Stat label="Target MAP" value={header.targetMap == null ? '—' : `≥ ${header.targetMap}`} unit="mmHg" />
     </div>
   )
 }

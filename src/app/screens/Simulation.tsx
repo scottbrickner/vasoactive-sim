@@ -224,15 +224,17 @@ export function Simulation() {
             onDiscontinue={discontinueInfusion}
           />
           <InfusionsPanel infusions={infusions} />
-          <BlockOfChartingControl
-            orders={orders}
-            infusions={infusions}
-            activeBlock={activeBlockOfCharting}
-            clockMinutes={clockMinutes}
-            disabled={locked}
-            onDeclare={declareBlockOfCharting}
-            onClose={closeBlockOfCharting}
-          />
+          {scenario.enableBlockOfCharting && (
+            <BlockOfChartingControl
+              orders={orders}
+              infusions={infusions}
+              activeBlock={activeBlockOfCharting}
+              clockMinutes={clockMinutes}
+              disabled={locked}
+              onDeclare={declareBlockOfCharting}
+              onClose={closeBlockOfCharting}
+            />
+          )}
           <ProviderNotifyControl
             disabled={locked}
             onNotify={(reason) => {

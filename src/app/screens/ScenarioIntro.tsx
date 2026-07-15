@@ -1,8 +1,14 @@
 import { useState } from 'react'
 import { Button, Panel, Toast } from '../../design/primitives'
 import { useSimStore } from '../../state/store'
-import { DEFAULT_SCENARIO } from '../../data/scenarios'
-import type { SimMode } from '../../state/types'
+import { SCENARIOS } from '../../data/scenarios'
+import type { ScenarioConfig, SimMode } from '../../state/types'
+
+const SCENARIO_POOL = Object.values(SCENARIOS)
+
+function pickRandomScenario(): ScenarioConfig {
+  return SCENARIO_POOL[Math.floor(Math.random() * SCENARIO_POOL.length)]
+}
 
 const MODE_COPY: Record<SimMode, { label: string; description: string }> = {
   training: {
@@ -19,12 +25,15 @@ const MODE_COPY: Record<SimMode, { label: string; description: string }> = {
 export function ScenarioIntro() {
   const startScenario = useSimStore((s) => s.startScenario)
   const setPhase = useSimStore((s) => s.setPhase)
-  const { patient, admissionReason, orders } = DEFAULT_SCENARIO
+  // Picked once per mount (not on every render) — re-rolling on a mode toggle click
+  // would silently swap the briefed scenario out from under the learner.
+  const [scenario] = useState(pickRandomScenario)
+  const { patient, admissionReason, orders, objective } = scenario
   const primaryTarget = orders.find((o) => o.sequence === 1)?.target
   const [mode, setMode] = useState<SimMode>('training')
 
   const handleBegin = () => {
-    startScenario(DEFAULT_SCENARIO, mode)
+    startScenario(scenario, mode)
     setPhase('sim')
   }
 
@@ -52,6 +61,10 @@ export function ScenarioIntro() {
             </div>
           ))}
         </dl>
+        <div className="mt-4 border-t border-border pt-4">
+          <dt className="text-xs font-semibold tracking-wide text-muted uppercase">Objective</dt>
+          <dd className="mt-1 text-base font-medium text-ink">{objective}</dd>
+        </div>
       </Panel>
 
       <Toast tone="info" title="How this works">

@@ -98,4 +98,6 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
   // reaches the 15 mmHg cap (MAP 42) after 30 min untreated, a realistic window for a
   // training scenario where a nurse might legitimately take some minutes to intervene.
   deterioration: { ratePerMinute: 0.5, maxDrop: 15 },
+  objective: 'Titrate norepinephrine as ordered, and sequence in a second pressor once it stops being enough on its own.',
+  enableBlockOfCharting: true,
 }

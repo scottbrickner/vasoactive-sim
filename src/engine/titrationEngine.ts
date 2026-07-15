@@ -78,7 +78,15 @@ export function evaluateTitration(request: TitrationRequest): TitrationResult {
     return { status: 'off-order', reasons: ['Dose must be greater than 0.'], violations: { invalidDose: true } }
   }
 
-  if (order.sequence > 1 && !priorAgentActivationMet) {
+  // Scoped to 'initiate' only — this gates a NEW dose entering play, not continued
+  // management of an infusion that's already running (whether started via a normal
+  // initiate or pre-seeded already-infusing by the scenario). Without this scoping, an
+  // agent that successfully activated while target was unmet would become newly
+  // unblockable — including for down-titration/weaning — the instant target is reached
+  // and priorAgentActivationMet's own targetUnmet condition flips false. Bug surfaced by
+  // the weaning scenario, where sequence>1 agents are pre-seeded infusing with MAP
+  // already above target from the start.
+  if (action === 'initiate' && order.sequence > 1 && !priorAgentActivationMet) {
     return {
       status: 'off-order',
       reasons: [order.activatesWhen ?? 'This agent has not yet been activated by the order.'],
