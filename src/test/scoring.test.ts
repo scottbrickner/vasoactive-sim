@@ -210,6 +210,112 @@ describe('scoreSession — retrospective charting', () => {
   })
 })
 
+function seedTwoAgentWeanOrder(vasopressinRate: number) {
+  useSimStore.setState((s) => ({
+    orders: s.orders.map((o) =>
+      o.id === NOREPI_ORDER_ID ? { ...o, weanOrder: 2 } : o.id === VASOPRESSIN_ORDER_ID ? { ...o, weanOrder: 1 } : o,
+    ),
+    infusions: [
+      ...s.infusions.filter((i) => i.drugId !== 'norepinephrine'),
+      {
+        id: 'infusion-norepi-seed',
+        orderId: NOREPI_ORDER_ID,
+        drugId: 'norepinephrine' as const,
+        status: 'infusing' as const,
+        rate: 10,
+        initialRate: 0.5,
+        channel: 'A',
+        beginBagCompleted: true,
+        lastActionMinute: 0,
+        stoppedAtMinute: null,
+        rateBeforePause: null,
+      },
+      {
+        id: 'infusion-vasopressin-seed',
+        orderId: VASOPRESSIN_ORDER_ID,
+        drugId: 'vasopressin' as const,
+        status: 'infusing' as const,
+        rate: vasopressinRate,
+        initialRate: 0.02,
+        channel: 'B',
+        beginBagCompleted: true,
+        lastActionMinute: 0,
+        stoppedAtMinute: null,
+        rateBeforePause: null,
+      },
+    ],
+  }))
+}
+
+describe('scoreSession — weaning sequence', () => {
+  it('is n/a when the scenario has no weaning-order requirement', () => {
+    expect(categoryStatus('weaning')).toBe('n/a')
+  })
+
+  it('is n/a when no actions have been taken yet, even with a weaning-order requirement configured', () => {
+    seedTwoAgentWeanOrder(0.03)
+    expect(categoryStatus('weaning')).toBe('n/a')
+  })
+
+  it('is partial when a down-titration is attempted before the lower-weanOrder agent is cleared', () => {
+    seedTwoAgentWeanOrder(0.03)
+    useSimStore.setState({ clockMinutes: 30 })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9.5) // down-titration, deferred (training mode)
+    useSimStore.getState().cancelDoseOverride()
+    expect(categoryStatus('weaning')).toBe('partial')
+  })
+
+  it('is partial when discontinuation happens before the lower-weanOrder agent is cleared', () => {
+    seedTwoAgentWeanOrder(0.03)
+    const norepiId = useSimStore.getState().infusions.find((i) => i.drugId === 'norepinephrine')!.id
+    useSimStore.getState().discontinueInfusion(norepiId)
+    expect(categoryStatus('weaning')).toBe('partial')
+  })
+
+  it('is met when the lower-weanOrder agent is already cleared before down-titrating', () => {
+    seedTwoAgentWeanOrder(0.02) // vasopressin already at its own startDose -- cleared
+    useSimStore.setState({ clockMinutes: 30 })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9.5)
+    expect(categoryStatus('weaning')).toBe('met')
+  })
+})
+
+describe('scoreSession — documentation cadence for pre-seeded infusions', () => {
+  function seedPreExistingNorepiInfusion() {
+    useSimStore.setState({
+      infusions: [
+        {
+          id: 'infusion-preseeded',
+          orderId: NOREPI_ORDER_ID,
+          drugId: 'norepinephrine',
+          status: 'infusing',
+          rate: 10,
+          initialRate: 10,
+          channel: 'A',
+          beginBagCompleted: true,
+          lastActionMinute: null,
+          stoppedAtMinute: null,
+          rateBeforePause: null,
+        },
+      ],
+    })
+  }
+
+  it('does not silently read n/a for an infusion that started already infusing (no real initiation LogEntry)', () => {
+    seedPreExistingNorepiInfusion()
+    expect(categoryStatus('documentation')).toBe('missed')
+  })
+
+  it('the pre-seeded infusion satisfies its initiation checkpoint via a chart at minute 0', () => {
+    seedPreExistingNorepiInfusion()
+    useSimStore.getState().chartVitals()
+    const card = score()
+    const doc = card.categories.find((c) => c.key === 'documentation')!
+    expect(doc.status).toBe('partial') // initiation satisfied; +30Start not yet due
+    expect(doc.detail).toMatch(/1 of 2/)
+  })
+})
+
 describe('scoreSession — no activity at all', () => {
   it('reports n/a categories and a null overall percent', () => {
     const card = score()

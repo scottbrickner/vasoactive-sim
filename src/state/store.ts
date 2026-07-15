@@ -77,6 +77,23 @@ export function priorAgentsActivationMet(
 }
 
 /**
+ * Down-titration's inverse of priorAgentsActivationMet: an order with `weanOrder`
+ * requires every order with a LOWER `weanOrder` to be "cleared" first — its infusion
+ * discontinued (absent from `infusions`), or brought down to at/below that order's own
+ * startDose. Trivially true when `order.weanOrder` is unset.
+ */
+export function priorAgentsWeaned(infusions: Infusion[], orders: Order[], order: Order): boolean {
+  const weanOrder = order.weanOrder
+  if (weanOrder == null) return true
+  const priorOrders = orders.filter((o) => o.weanOrder != null && o.weanOrder < weanOrder)
+  return priorOrders.every((priorOrder) => {
+    const infusion = infusions.find((i) => i.orderId === priorOrder.id)
+    if (!infusion) return true
+    return infusion.rate <= priorOrder.startDose + 1e-9
+  })
+}
+
+/**
  * True the instant a titrate newly crosses `order.earlyNotificationThreshold` (a
  * fraction of THIS order's own maxDose, distinct from `activationThreshold`'s prior-
  * order fraction) with target still unmet — a provider-notification checkpoint earlier
@@ -380,6 +397,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           currentMap: state.vitals.map,
           priorAgentActivationMet:
             order.sequence === 1 || priorAgentsActivationMet(state.infusions, state.orders, state.vitals.map, order),
+          priorAgentsWeaned: priorAgentsWeaned(state.infusions, state.orders, order),
         })
 
     // Guardrails hard limit is an absolute pump ceiling — it wins over everything else,
@@ -808,6 +826,11 @@ export const useSimStore = create<SimStore>((set, get) => ({
     const infusion = state.infusions.find((i) => i.id === infusionId)
     if (!infusion) return
     const drug = getDrug(infusion.drugId)
+    const order = state.orders.find((o) => o.id === infusion.orderId)
+    // Discontinue stays ungated (see restartInfusion's comment above) — a nurse can always
+    // pull an infusion — but out-of-weanOrder discontinuation is retroactively flagged
+    // here, purely for debrief scoring (category 8), not blocked live.
+    const wrongWeanOrder = order && !priorAgentsWeaned(state.infusions, state.orders, order) ? true : undefined
     const actionEntry: LogEntry = {
       id: nextId('log'),
       minute: state.clockMinutes,
@@ -816,6 +839,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       orderId: infusion.orderId,
       drugId: infusion.drugId,
       lifecycleAction: 'discontinue',
+      violations: wrongWeanOrder ? { wrongWeanOrder: true } : undefined,
     }
     const marEntry: LogEntry = {
       id: nextId('log'),

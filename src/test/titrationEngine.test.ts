@@ -29,6 +29,7 @@ function base(overrides: Partial<Parameters<typeof evaluateTitration>[0]> = {}) 
     lastActionMinute: 0,
     currentMap: belowTargetMap,
     priorAgentActivationMet: true,
+    priorAgentsWeaned: true,
     ...overrides,
   })
 }
@@ -44,6 +45,7 @@ describe('titrationEngine — initiation', () => {
       lastActionMinute: null,
       currentMap: belowTargetMap,
       priorAgentActivationMet: true,
+      priorAgentsWeaned: true,
     })
     expect(result).toEqual({ status: 'ok', reasons: [], violations: {} })
   })
@@ -58,6 +60,7 @@ describe('titrationEngine — initiation', () => {
       lastActionMinute: null,
       currentMap: belowTargetMap,
       priorAgentActivationMet: true,
+      priorAgentsWeaned: true,
     })
     expect(result.status).toBe('off-order')
     expect(result.reasons[0]).toMatch(/starting dose is 0\.5/i)
@@ -106,6 +109,7 @@ describe('titrationEngine — titration mechanics', () => {
       lastActionMinute: 0,
       currentMap: belowTargetMap,
       priorAgentActivationMet: true,
+      priorAgentsWeaned: true,
     })
     expect(result).toEqual({ status: 'ok', reasons: [], violations: {} })
   })
@@ -146,6 +150,7 @@ describe('titrationEngine — multi-agent sequence', () => {
       lastActionMinute: null,
       currentMap: belowTargetMap,
       priorAgentActivationMet: false,
+      priorAgentsWeaned: true,
     })
     expect(result.status).toBe('off-order')
     expect(result.reasons[0]).toBe(vasopressinOrder.activatesWhen)
@@ -162,6 +167,7 @@ describe('titrationEngine — multi-agent sequence', () => {
       lastActionMinute: null,
       currentMap: belowTargetMap,
       priorAgentActivationMet: true,
+      priorAgentsWeaned: true,
     })
     expect(result).toEqual({ status: 'ok', reasons: [], violations: {} })
   })
@@ -171,6 +177,37 @@ describe('titrationEngine — multi-agent sequence', () => {
     expect(result.sequence).toBe(1)
     const evaluated = base({ priorAgentActivationMet: false })
     expect(evaluated.status).toBe('ok')
+  })
+})
+
+describe('titrationEngine — weaning order', () => {
+  const weanOrder2: Order = { ...norepiOrder, weanOrder: 2 }
+  const weanOrder1: Order = { ...norepiOrder, weanOrder: 1 }
+
+  it('off-order to down-titrate an agent with weanOrder > 1 before priorAgentsWeaned', () => {
+    const result = base({ order: weanOrder2, currentDose: 10, proposedDose: 9.5, priorAgentsWeaned: false })
+    expect(result.status).toBe('off-order')
+    expect(result.violations).toEqual({ wrongWeanOrder: true })
+  })
+
+  it('ok to down-titrate the same agent once priorAgentsWeaned is true', () => {
+    const result = base({ order: weanOrder2, currentDose: 10, proposedDose: 9.5, priorAgentsWeaned: true })
+    expect(result.status).toBe('ok')
+  })
+
+  it('does not gate an up-titration, even when priorAgentsWeaned is false', () => {
+    const result = base({ order: weanOrder2, currentDose: 9.5, proposedDose: 10, priorAgentsWeaned: false })
+    expect(result.status).toBe('ok')
+  })
+
+  it('weanOrder === 1 is never gated regardless of priorAgentsWeaned', () => {
+    const result = base({ order: weanOrder1, currentDose: 10, proposedDose: 9.5, priorAgentsWeaned: false })
+    expect(result.status).toBe('ok')
+  })
+
+  it('an order with no weanOrder is never gated', () => {
+    const result = base({ currentDose: 10, proposedDose: 9.5, priorAgentsWeaned: false })
+    expect(result.status).toBe('ok')
   })
 })
 

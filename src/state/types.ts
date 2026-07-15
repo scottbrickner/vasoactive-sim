@@ -117,6 +117,13 @@ export interface Order {
    * trigger; omit to leave this order without an early-notification requirement.
    */
   earlyNotificationThreshold?: number
+  /**
+   * 1-indexed position in the down-titration/discontinuation sequence — independent of
+   * `sequence` (the up-titration order), though the natural case is its inverse (the
+   * latest-added adjunct agent weans first, the mainstay agent weans last). Omit for
+   * orders with no weaning-order requirement (see priorAgentsWeaned in state/store.ts).
+   */
+  weanOrder?: number
 }
 
 export type InfusionStatus = 'hanging' | 'infusing' | 'stopped'
@@ -176,6 +183,8 @@ export interface TitrationViolations {
   targetAlreadyMet?: boolean
   intervalTooSoon?: boolean
   wrongIncrement?: boolean
+  /** Down-titrated (or discontinued) an agent before every lower-`weanOrder` agent was cleared (see priorAgentsWeaned). */
+  wrongWeanOrder?: boolean
 }
 
 /** Alaris Guardrails dose evaluation outcome (see engine/guardrails.ts). */

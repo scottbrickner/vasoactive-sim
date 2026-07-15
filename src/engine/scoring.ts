@@ -52,7 +52,7 @@ function hasOwn(record: Record<string, boolean>, id: string): boolean {
 }
 
 export function scoreSession(input: ScoringInput): Scorecard {
-  const { orders, log, verificationFlags, adherenceFlags, blockOfChartingHistory } = input
+  const { orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory } = input
   const doseEntries = log.filter((e) => e.type === 'action' && e.doseAction != null)
   // Order-compliance is deliberately bypassed under an active Block of Charting (CP
   // 4-156's emergent pathway — see store.ts's submitDose) — those entries were never
@@ -154,12 +154,19 @@ export function scoreSession(input: ScoringInput): Scorecard {
       const initiation = doseEntries.find(
         (e) => e.orderId === order.id && e.doseAction === 'initiate' && e.outcome === 'applied',
       )
-      if (!initiation) return []
+      // A scenario can pre-seed an order's infusion already infusing (e.g. a weaning
+      // scenario's ScenarioConfig.initialInfusions) — it never passes through submitDose's
+      // initiate path, so there's no real initiation LogEntry to anchor cadence checks to.
+      // Anchor to minute 0 instead of silently treating the whole order as "nothing
+      // started yet" (which would read as n/a regardless of the learner's own charting).
+      const preSeededInfusion = infusions.find((i) => i.orderId === order.id && i.status !== 'hanging')
+      const initiationMinute = initiation?.minute ?? (preSeededInfusion ? 0 : null)
+      if (initiationMinute == null) return []
       const titrationMinutes = doseEntries
         .filter((e) => e.orderId === order.id && e.doseAction === 'titrate' && e.outcome === 'applied')
         .map((e) => e.minute)
         .sort((a, b) => a - b)
-      return checkCadence(initiation.minute, titrationMinutes, chartedMinutes)
+      return checkCadence(initiationMinute, titrationMinutes, chartedMinutes)
     })
     const met = allChecks.filter((c) => c.met).length
     categories.push({
@@ -214,6 +221,31 @@ export function scoreSession(input: ScoringInput): Scorecard {
         blockOfChartingHistory.length === 0
           ? 'No Block of Charting episode occurred this session.'
           : `${compliant} of ${blockOfChartingHistory.length} Block of Charting episode(s) had parameters charted and the provider notified.`,
+    })
+  }
+
+  // 8. Weaning sequence — never "missed", mirroring category 3's framing: a submitDose-path
+  // attempt is hard-blocked by evaluateTitration (a knowledge gap, not harm that occurred),
+  // and a discontinueInfusion-path violation is retroactive-only (discontinue stays
+  // ungated) so it genuinely can't be "blocked" either — both stay "partial", not "missed".
+  // Sourced from `log` broadly, not `doseEntries`, since discontinueInfusion entries carry
+  // no `doseAction`.
+  {
+    const weanedOrders = orders.filter((o) => o.weanOrder != null)
+    const weanAttempts = log.filter((e) => e.type === 'action' && e.violations?.wrongWeanOrder)
+    const noActivityYet = log.filter((e) => e.type === 'action').length === 0
+    categories.push({
+      key: 'weaning',
+      label: 'Weaning sequence',
+      status: weanedOrders.length === 0 || noActivityYet ? 'n/a' : weanAttempts.length === 0 ? 'met' : 'partial',
+      detail:
+        weanedOrders.length === 0
+          ? 'This scenario has no weaning-order requirement to assess.'
+          : noActivityYet
+            ? 'No actions were taken yet.'
+            : weanAttempts.length === 0
+              ? 'No down-titration or discontinuation was attempted before a lower-weanOrder agent was cleared.'
+              : `${weanAttempts.length} down-titration/discontinuation attempt(s) occurred before a lower-weanOrder agent was cleared.`,
     })
   }
 

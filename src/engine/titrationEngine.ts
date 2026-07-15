@@ -32,6 +32,12 @@ export interface TitrationRequest {
    * for sequence 1.
    */
   priorAgentActivationMet: boolean
+  /**
+   * Whether every order with a lower `weanOrder` than this one has been "cleared" (see
+   * priorAgentsWeaned in state/store.ts). Always computed and passed, mirroring
+   * `priorAgentActivationMet` — ignored when `order.weanOrder` is 1 or unset.
+   */
+  priorAgentsWeaned: boolean
 }
 
 export interface TitrationResult {
@@ -65,6 +71,7 @@ export function evaluateTitration(request: TitrationRequest): TitrationResult {
     lastActionMinute,
     currentMap,
     priorAgentActivationMet,
+    priorAgentsWeaned,
   } = request
 
   if (proposedDose <= 0) {
@@ -91,6 +98,14 @@ export function evaluateTitration(request: TitrationRequest): TitrationResult {
 
   // action === 'titrate'
   const targetMet = meetsTarget(currentMap, order.target)
+
+  if (proposedDose < currentDose && order.weanOrder != null && order.weanOrder > 1 && !priorAgentsWeaned) {
+    return {
+      status: 'off-order',
+      reasons: ['A lower-weanOrder agent has not yet been weaned — clear that agent before down-titrating this one.'],
+      violations: { wrongWeanOrder: true },
+    }
+  }
 
   if (proposedDose > order.maxDose) {
     return !targetMet

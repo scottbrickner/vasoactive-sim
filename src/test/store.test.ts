@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { useSimStore } from '../state/store'
+import { priorAgentsWeaned, useSimStore } from '../state/store'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
 
 const NOREPI_ORDER_ID = 'order-norepinephrine-agent1'
@@ -707,5 +707,132 @@ describe('store — vitalsHistory and retrospective charting', () => {
     const entry = useSimStore.getState().log.find((e) => e.type === 'documentation')!
     expect(entry.retrospective).toBeUndefined()
     expect(entry.enteredAtMinute).toBeUndefined()
+  })
+})
+
+function seedTwoAgentWeanOrder(vasopressinRate: number) {
+  useSimStore.setState((s) => ({
+    orders: s.orders.map((o) =>
+      o.id === NOREPI_ORDER_ID ? { ...o, weanOrder: 2 } : o.id === VASOPRESSIN_ORDER_ID ? { ...o, weanOrder: 1 } : o,
+    ),
+    infusions: [
+      { ...norepiInfusion(), status: 'infusing' as const, rate: 10, lastActionMinute: 0 },
+      {
+        id: 'infusion-vasopressin',
+        orderId: VASOPRESSIN_ORDER_ID,
+        drugId: 'vasopressin' as const,
+        status: 'infusing' as const,
+        rate: vasopressinRate,
+        initialRate: 0.02,
+        channel: 'B',
+        beginBagCompleted: true,
+        lastActionMinute: 0,
+        stoppedAtMinute: null,
+        rateBeforePause: null,
+      },
+    ],
+  }))
+}
+
+describe('store — priorAgentsWeaned', () => {
+  it('is true when the order has no weanOrder requirement', () => {
+    const state = useSimStore.getState()
+    const order = state.orders.find((o) => o.id === NOREPI_ORDER_ID)!
+    expect(priorAgentsWeaned(state.infusions, state.orders, order)).toBe(true)
+  })
+
+  it('is false while a lower-weanOrder agent is still above its own startDose', () => {
+    seedTwoAgentWeanOrder(0.03) // vasopressin startDose is 0.02 — 0.03 is still above it
+    const state = useSimStore.getState()
+    const norepiOrder = state.orders.find((o) => o.id === NOREPI_ORDER_ID)!
+    expect(priorAgentsWeaned(state.infusions, state.orders, norepiOrder)).toBe(false)
+  })
+
+  it('is true once the lower-weanOrder agent is back at or below its own startDose', () => {
+    seedTwoAgentWeanOrder(0.02)
+    const state = useSimStore.getState()
+    const norepiOrder = state.orders.find((o) => o.id === NOREPI_ORDER_ID)!
+    expect(priorAgentsWeaned(state.infusions, state.orders, norepiOrder)).toBe(true)
+  })
+
+  it('is true when the lower-weanOrder agent has been discontinued (its infusion absent)', () => {
+    seedTwoAgentWeanOrder(0.03)
+    useSimStore.setState((s) => ({ infusions: s.infusions.filter((i) => i.drugId !== 'vasopressin') }))
+    const state = useSimStore.getState()
+    const norepiOrder = state.orders.find((o) => o.id === NOREPI_ORDER_ID)!
+    expect(priorAgentsWeaned(state.infusions, state.orders, norepiOrder)).toBe(true)
+  })
+})
+
+describe('store — wean-order gating on titrate', () => {
+  it('rejects (deferred, training-mode override) a down-titration before the lower-weanOrder agent is cleared', () => {
+    seedTwoAgentWeanOrder(0.03)
+    useSimStore.setState({ clockMinutes: 30 })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9.5) // down from 10, delta 0.5 matches increment
+    expect(useSimStore.getState().pendingOverride?.violations.wrongWeanOrder).toBe(true)
+    expect(norepiInfusion().rate).toBe(10)
+  })
+
+  it('applies once the lower-weanOrder agent is cleared', () => {
+    seedTwoAgentWeanOrder(0.02)
+    useSimStore.setState({ clockMinutes: 30 })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9.5)
+    expect(useSimStore.getState().pendingOverride).toBeNull()
+    expect(norepiInfusion().rate).toBe(9.5)
+  })
+
+  it('does not gate an up-titration, even before the lower-weanOrder agent is cleared', () => {
+    seedTwoAgentWeanOrder(0.03)
+    useSimStore.setState({ clockMinutes: 30 })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 10.5) // up from 10
+    expect(useSimStore.getState().pendingOverride).toBeNull()
+    expect(norepiInfusion().rate).toBe(10.5)
+  })
+})
+
+describe('store — discontinueInfusion retroactive wean-order flagging', () => {
+  it('stamps wrongWeanOrder on the discontinue log entry when a lower-weanOrder agent is still active', () => {
+    seedTwoAgentWeanOrder(0.03)
+    useSimStore.getState().discontinueInfusion(norepiInfusion().id)
+    const entry = useSimStore.getState().log.find((e) => e.lifecycleAction === 'discontinue')!
+    expect(entry.violations?.wrongWeanOrder).toBe(true)
+    // Stays ungated — the infusion is removed despite the violation.
+    expect(useSimStore.getState().infusions.some((i) => i.drugId === 'norepinephrine')).toBe(false)
+  })
+
+  it('does not flag discontinuation once the lower-weanOrder agent is already cleared', () => {
+    seedTwoAgentWeanOrder(0.02)
+    useSimStore.getState().discontinueInfusion(norepiInfusion().id)
+    const entry = useSimStore.getState().log.find((e) => e.lifecycleAction === 'discontinue')!
+    expect(entry.violations).toBeUndefined()
+  })
+})
+
+describe('store — startScenario supports multiple initialInfusions', () => {
+  it('seeds one Infusion per entry in scenario.initialInfusions', () => {
+    const multiInfusionScenario = {
+      ...DEFAULT_SCENARIO,
+      initialInfusions: [
+        DEFAULT_SCENARIO.initialInfusions[0],
+        {
+          id: 'infusion-vasopressin-seed',
+          orderId: VASOPRESSIN_ORDER_ID,
+          drugId: 'vasopressin' as const,
+          status: 'infusing' as const,
+          rate: 0.03,
+          initialRate: 0.02,
+          channel: 'B',
+          beginBagCompleted: true,
+          lastActionMinute: 0,
+          stoppedAtMinute: null,
+          rateBeforePause: null,
+        },
+      ],
+    }
+    useSimStore.getState().startScenario(multiInfusionScenario, 'training')
+    const state = useSimStore.getState()
+    expect(state.infusions).toHaveLength(2)
+    expect(state.infusions.some((i) => i.drugId === 'norepinephrine')).toBe(true)
+    expect(state.infusions.some((i) => i.drugId === 'vasopressin' && i.rate === 0.03)).toBe(true)
   })
 })
