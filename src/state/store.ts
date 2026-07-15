@@ -265,7 +265,7 @@ function initialSimFields(scenario: ScenarioConfig, mode: SimMode) {
     mode,
     scenario,
     clockMinutes: 0,
-    infusions: [{ ...scenario.initialInfusion }],
+    infusions: scenario.initialInfusions.map((i) => ({ ...i })),
     vitals: { ...scenario.startingVitals },
     orders: scenario.orders.map((o) => ({ ...o, activatesWhen: deriveActivationText(o, scenario.orders) })),
     log: [] as LogEntry[],

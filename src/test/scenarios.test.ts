@@ -15,7 +15,7 @@ describe('first scenario — neutropenic septic shock', () => {
   })
 
   it('hangs norepinephrine with Begin Bag incomplete and rate stopped', () => {
-    const infusion = DEFAULT_SCENARIO.initialInfusion
+    const infusion = DEFAULT_SCENARIO.initialInfusions[0]
     expect(infusion.drugId).toBe('norepinephrine')
     expect(infusion.status).toBe('hanging')
     expect(infusion.beginBagCompleted).toBe(false)
@@ -45,8 +45,10 @@ describe('first scenario — neutropenic septic shock', () => {
     expect(activatesWhen).toMatch(/33%/)
   })
 
-  it('the initial infusion references a real order in the scenario', () => {
+  it('every initial infusion references a real order in the scenario', () => {
     const orderIds = new Set(DEFAULT_SCENARIO.orders.map((o) => o.id))
-    expect(orderIds.has(DEFAULT_SCENARIO.initialInfusion.orderId)).toBe(true)
+    for (const infusion of DEFAULT_SCENARIO.initialInfusions) {
+      expect(orderIds.has(infusion.orderId)).toBe(true)
+    }
   })
 })

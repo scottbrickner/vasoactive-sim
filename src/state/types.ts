@@ -269,7 +269,7 @@ export interface ScenarioConfig {
   patient: Patient
   admissionReason: string
   startingVitals: VitalSigns
-  initialInfusion: Infusion
+  initialInfusions: Infusion[]
   orders: Order[]
   /** Time for the monitor to reflect a correct titration. */
   responseLagMinutes: TitrationInterval
