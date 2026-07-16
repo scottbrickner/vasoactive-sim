@@ -19,11 +19,13 @@ import { DEFAULT_SCENARIO } from '../data/scenarios'
 import type {
   BlockOfChartingRecord,
   DrugDefinition,
+  DrugId,
   GuardrailStatus,
   Infusion,
   LogEntry,
   Order,
   Phase,
+  ProctorRecord,
   ScenarioConfig,
   SimMode,
   TitrationViolations,
@@ -44,12 +46,21 @@ function nextId(prefix: string): string {
   return `${prefix}-${idCounter}`
 }
 
-/** A drug's own MAP contribution is 0 unless the scenario tunes a response ceiling for it. */
-function contributionFor(infusion: Infusion, scenario: ScenarioConfig): number {
-  const model = scenario.responseModel[infusion.drugId]
-  if (!model) return 0
+/**
+ * A drug's own MAP contribution is 0 unless the scenario tunes a response ceiling for
+ * it — or a facilitator has live-overridden that ceiling for the rest of the session
+ * (see Facilitator.tsx's OverrideControls; `responseModelOverrides` takes precedence
+ * over the scenario's own tuning when present).
+ */
+function contributionFor(
+  infusion: Infusion,
+  scenario: ScenarioConfig,
+  responseModelOverrides: Partial<Record<DrugId, number>>,
+): number {
+  const maxMapContribution = responseModelOverrides[infusion.drugId] ?? scenario.responseModel[infusion.drugId]?.maxMapContribution
+  if (maxMapContribution == null) return 0
   const drug = getDrug(infusion.drugId)
-  return projectDoseResponse(infusion.rate, drug.maxDose, model.maxMapContribution)
+  return projectDoseResponse(infusion.rate, drug.maxDose, maxMapContribution)
 }
 
 /**
@@ -247,11 +258,44 @@ interface SimStore {
   /** Snapshot of live vitals at each sim minute reached — see chartRetrospective. */
   vitalsHistory: { minute: number; vitals: ScenarioConfig['startingVitals'] }[]
   feedback: FeedbackMessage | null
+  /** Who's proctoring this session and when, for a facilitated session — see sync/. Null for standalone solo practice; never gates anything. */
+  proctor: ProctorRecord | null
+  /**
+   * A facilitator's live vital-sign overrides (Phase 10, educator tier only) — HR and
+   * ART's two components (SBP/DBP) and SpO2 ONLY; MAP is deliberately not
+   * independently overridable (it's derived/computed everywhere else in this engine —
+   * see advanceClock). Absent keys fall back to the scenario's own computation.
+   * Applied both live (every advanceClock tick) and to the NEXT scenario's opening
+   * vitals (startScenario) — persists across scenario picks until cleared.
+   */
+  vitalOverrides: Partial<Pick<VitalSigns, 'hr' | 'sbp' | 'dbp' | 'spo2'>>
+  /** A facilitator's live per-drug MAP-response-ceiling overrides, keyed by DrugId — supersedes the scenario's own responseModel entry when present (see contributionFor). Persists across scenario picks until cleared. */
+  responseModelOverrides: Partial<Record<DrugId, number>>
 
   setPhase: (phase: Phase) => void
+  /** Stamps the current time and records who's proctoring this session (see ProctorRecord doc). */
+  setProctor: (name: string) => void
   /** (Re)initializes the live sim state from a scenario config — used by both "Begin simulation" and "Restart simulation". */
   startScenario: (scenario: ScenarioConfig, mode: SimMode) => void
   dismissFeedback: () => void
+
+  /** Facilitator-only (Phase 10, educator tier): sets a live vital-sign override and logs it. */
+  commitVitalOverride: (key: 'hr' | 'sbp' | 'dbp' | 'spo2', value: number) => void
+  /** Facilitator-only: clears a single vital-sign override, letting the scenario's own computation resume next tick. */
+  clearVitalOverride: (key: 'hr' | 'sbp' | 'dbp' | 'spo2') => void
+  /** Facilitator-only: overrides a drug's MAP-response ceiling for the rest of the session. */
+  setResponseModelOverride: (drugId: DrugId, maxMapContribution: number) => void
+  /** Facilitator-only: clears a single drug's response-model override. */
+  clearResponseModelOverride: (drugId: DrugId) => void
+  /** Facilitator-only: immediately nudges MAP up by reducing the deterioration offset (blunt, not gradual). */
+  forceImprove: (mmHg: number) => void
+  /** Facilitator-only: immediately nudges MAP down by increasing the deterioration offset, capped at the scenario's maxDrop (blunt, not gradual). */
+  forceWorsen: (mmHg: number) => void
+  /** Facilitator-only: live-edits an in-progress order's max dose, increment, minimum interval, or target value. */
+  updateOrder: (
+    orderId: string,
+    patch: Partial<{ maxDose: number; increment: number; intervalMinMinutes: number; targetValue: number }>,
+  ) => void
 
   completeBeginBag: (infusionId: string) => void
   /** Handles both initiation (no/hanging infusion) and titration (infusing), keyed by order. */
@@ -277,13 +321,19 @@ interface SimStore {
   closeBlockOfCharting: () => void
 }
 
-function initialSimFields(scenario: ScenarioConfig, mode: SimMode) {
+function initialSimFields(
+  scenario: ScenarioConfig,
+  mode: SimMode,
+  vitalOverrides: Partial<Pick<VitalSigns, 'hr' | 'sbp' | 'dbp' | 'spo2'>> = {},
+) {
   return {
     mode,
     scenario,
     clockMinutes: 0,
     infusions: scenario.initialInfusions.map((i) => ({ ...i })),
-    vitals: { ...scenario.startingVitals },
+    // A standing facilitator vital override (Phase 10) applies to this scenario's
+    // OPENING vitals too, not just live mid-session ticks — see advanceClock.
+    vitals: { ...scenario.startingVitals, ...vitalOverrides },
     orders: scenario.orders.map((o) => ({ ...o, activatesWhen: deriveActivationText(o, scenario.orders) })),
     log: [] as LogEntry[],
     verificationFlags: {} as Record<string, boolean>,
@@ -300,13 +350,106 @@ function initialSimFields(scenario: ScenarioConfig, mode: SimMode) {
 
 export const useSimStore = create<SimStore>((set, get) => ({
   phase: 'intro' as Phase,
+  // Not part of initialSimFields — proctor identity and facilitator overrides persist
+  // across scenario restarts within the same facilitated session, unlike the rest of
+  // sim state (vitalOverrides is explicitly re-applied to each new scenario's opening
+  // vitals by startScenario below, rather than being wiped by it).
+  proctor: null as ProctorRecord | null,
+  vitalOverrides: {} as SimStore['vitalOverrides'],
+  responseModelOverrides: {} as SimStore['responseModelOverrides'],
   ...initialSimFields(DEFAULT_SCENARIO, 'training'),
 
   setPhase: (phase) => set({ phase }),
+  setProctor: (name) => set({ proctor: { name, recordedAt: new Date().toISOString() } }),
 
-  startScenario: (nextScenario, mode) => set(initialSimFields(nextScenario, mode)),
+  startScenario: (nextScenario, mode) => set((s) => initialSimFields(nextScenario, mode, s.vitalOverrides)),
 
   dismissFeedback: () => set({ feedback: null }),
+
+  commitVitalOverride: (key, value) => {
+    const state = get()
+    const entry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `Facilitator set ${key.toUpperCase()} to ${value} (live override).`,
+    }
+    set((s) => ({
+      vitals: { ...s.vitals, [key]: value },
+      vitalOverrides: { ...s.vitalOverrides, [key]: value },
+      log: [...s.log, entry],
+    }))
+  },
+
+  clearVitalOverride: (key) =>
+    set((s) => {
+      const nextOverrides = { ...s.vitalOverrides }
+      delete nextOverrides[key]
+      return { vitalOverrides: nextOverrides }
+    }),
+
+  setResponseModelOverride: (drugId, maxMapContribution) =>
+    set((s) => ({ responseModelOverrides: { ...s.responseModelOverrides, [drugId]: maxMapContribution } })),
+
+  clearResponseModelOverride: (drugId) =>
+    set((s) => {
+      const next = { ...s.responseModelOverrides }
+      delete next[drugId]
+      return { responseModelOverrides: next }
+    }),
+
+  forceImprove: (mmHg) =>
+    set((s) => {
+      const delta = Math.min(mmHg, s.deteriorationOffset)
+      return {
+        deteriorationOffset: s.deteriorationOffset - delta,
+        vitals: { ...s.vitals, map: s.vitals.map + delta },
+        lastPhysiologyUpdate: s.lastPhysiologyUpdate
+          ? { minute: s.clockMinutes, map: s.vitals.map + delta }
+          : s.lastPhysiologyUpdate,
+      }
+    }),
+
+  forceWorsen: (mmHg) =>
+    set((s) => {
+      const maxDrop = s.scenario.deterioration.maxDrop
+      const delta = Math.min(mmHg, Math.max(0, maxDrop - s.deteriorationOffset))
+      return {
+        deteriorationOffset: s.deteriorationOffset + delta,
+        vitals: { ...s.vitals, map: s.vitals.map - delta },
+        lastPhysiologyUpdate: s.lastPhysiologyUpdate
+          ? { minute: s.clockMinutes, map: s.vitals.map - delta }
+          : s.lastPhysiologyUpdate,
+      }
+    }),
+
+  updateOrder: (orderId, patch) => {
+    const state = get()
+    const order = state.orders.find((o) => o.id === orderId)
+    if (!order) return
+    const drug = getDrug(order.drugId)
+    const entry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `Facilitator edited the ${drug.name} order.`,
+      orderId,
+      drugId: order.drugId,
+    }
+    set((s) => ({
+      orders: s.orders.map((o) => {
+        if (o.id !== orderId) return o
+        return {
+          ...o,
+          maxDose: patch.maxDose ?? o.maxDose,
+          increment: patch.increment ?? o.increment,
+          interval: patch.intervalMinMinutes != null ? { ...o.interval, minMinutes: patch.intervalMinMinutes } : o.interval,
+          target: patch.targetValue != null ? { ...o.target, value: patch.targetValue } : o.target,
+        }
+      }),
+      log: [...s.log, entry],
+    }))
+  },
 
   completeBeginBag: (infusionId) => {
     const state = get()
@@ -671,7 +814,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
     // rest of the vitals stay at their scenario starting values through the sim.
     const contributions = state.infusions
       .filter((i) => i.status === 'infusing')
-      .map((i) => contributionFor(i, state.scenario))
+      .map((i) => contributionFor(i, state.scenario, state.responseModelOverrides))
     const projectedMap = projectMap(state.scenario.startingVitals.map, contributions)
 
     let map = state.vitals.map
@@ -742,10 +885,21 @@ export const useSimStore = create<SimStore>((set, get) => ({
     // exact value, so it's safe to jitter directly. SBP/DBP get the SAME jitter value
     // (a parallel shift) rather than independent jitter each, preserving the pulse
     // pressure deriveBloodPressure already guarantees.
-    const hr = Math.round(state.scenario.startingVitals.hr + periodicVariability(nextMinute, 2.5, 7))
+    // A facilitator's live vital override (see Facilitator.tsx's OverrideControls)
+    // takes precedence over the scenario's own baseline+jitter computation — it's a
+    // standing override, not a one-off, so it keeps winning every tick until cleared.
+    const { hr: hrOverride, sbp: sbpOverride, dbp: dbpOverride, spo2: spo2Override } = state.vitalOverrides
+    const hr = hrOverride ?? Math.round(state.scenario.startingVitals.hr + periodicVariability(nextMinute, 2.5, 7))
     const bpJitter = Math.round(periodicVariability(nextMinute, 4, 11, 3))
     const { sbp: baseSbp, dbp: baseDbp } = deriveBloodPressure(map, state.scenario.startingVitals)
-    const nextVitals = { ...state.vitals, map, hr, sbp: baseSbp + bpJitter, dbp: baseDbp + bpJitter }
+    const nextVitals = {
+      ...state.vitals,
+      map,
+      hr,
+      sbp: sbpOverride ?? baseSbp + bpJitter,
+      dbp: dbpOverride ?? baseDbp + bpJitter,
+      spo2: spo2Override ?? state.vitals.spo2,
+    }
     set({
       clockMinutes: nextMinute,
       vitals: nextVitals,

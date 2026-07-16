@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { priorAgentsWeaned, useSimStore } from '../state/store'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
 
@@ -834,5 +834,171 @@ describe('store — startScenario supports multiple initialInfusions', () => {
     expect(state.infusions).toHaveLength(2)
     expect(state.infusions.some((i) => i.drugId === 'norepinephrine')).toBe(true)
     expect(state.infusions.some((i) => i.drugId === 'vasopressin' && i.rate === 0.03)).toBe(true)
+  })
+})
+
+describe('store — proctor record', () => {
+  it('is null until setProctor is called', () => {
+    expect(useSimStore.getState().proctor).toBeNull()
+  })
+
+  it('setProctor stamps a name and an ISO timestamp', () => {
+    useSimStore.getState().setProctor('J. Rivera')
+    const { proctor } = useSimStore.getState()
+    expect(proctor?.name).toBe('J. Rivera')
+    expect(proctor?.recordedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    useSimStore.setState({ proctor: null })
+  })
+
+  it('survives a scenario restart (unlike the rest of sim state)', () => {
+    useSimStore.getState().setProctor('J. Rivera')
+    useSimStore.getState().startScenario(DEFAULT_SCENARIO, 'training')
+    expect(useSimStore.getState().proctor?.name).toBe('J. Rivera')
+    useSimStore.setState({ proctor: null })
+  })
+})
+
+describe('store — facilitator vital overrides', () => {
+  afterEach(() => {
+    useSimStore.setState({ vitalOverrides: {} })
+  })
+
+  it('commitVitalOverride sets the vital immediately and logs it', () => {
+    useSimStore.getState().commitVitalOverride('hr', 140)
+    const state = useSimStore.getState()
+    expect(state.vitals.hr).toBe(140)
+    expect(state.vitalOverrides.hr).toBe(140)
+    expect(state.log.some((e) => /Facilitator set HR to 140/.test(e.summary))).toBe(true)
+  })
+
+  it('an override wins over the scenario baseline+jitter computation on the next advanceClock tick', () => {
+    useSimStore.getState().commitVitalOverride('hr', 140)
+    useSimStore.getState().advanceClock(3)
+    expect(useSimStore.getState().vitals.hr).toBe(140)
+  })
+
+  it('SBP/DBP overrides both win over deriveBloodPressure on the next tick', () => {
+    useSimStore.getState().commitVitalOverride('sbp', 200)
+    useSimStore.getState().commitVitalOverride('dbp', 120)
+    useSimStore.getState().advanceClock(3)
+    const { vitals } = useSimStore.getState()
+    expect(vitals.sbp).toBe(200)
+    expect(vitals.dbp).toBe(120)
+  })
+
+  it('never overrides MAP — an HR override in isolation leaves MAP identical to the no-override case', () => {
+    // Freeze deterioration (an infusing infusion) so MAP has no OTHER reason to move,
+    // isolating whether the HR override itself leaks into the MAP computation.
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing' as const } : i)),
+    }))
+    useSimStore.getState().advanceClock(3)
+    const mapWithoutOverride = useSimStore.getState().vitals.map
+
+    useSimStore.getState().startScenario(DEFAULT_SCENARIO, 'training')
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing' as const } : i)),
+    }))
+    useSimStore.getState().commitVitalOverride('hr', 140)
+    useSimStore.getState().advanceClock(3)
+    expect(useSimStore.getState().vitals.map).toBe(mapWithoutOverride)
+  })
+
+  it('clearVitalOverride lets the scenario computation resume on the next tick', () => {
+    useSimStore.getState().commitVitalOverride('hr', 140)
+    useSimStore.getState().clearVitalOverride('hr')
+    useSimStore.getState().advanceClock(3)
+    expect(useSimStore.getState().vitals.hr).not.toBe(140)
+  })
+
+  it('an active override applies to the NEXT scenario picked (opening vitals)', () => {
+    useSimStore.getState().commitVitalOverride('spo2', 88)
+    useSimStore.getState().startScenario(DEFAULT_SCENARIO, 'training')
+    expect(useSimStore.getState().vitals.spo2).toBe(88)
+  })
+})
+
+describe('store — facilitator response-model overrides', () => {
+  afterEach(() => {
+    useSimStore.setState({ responseModelOverrides: {} })
+  })
+
+  it('setResponseModelOverride changes the MAP contribution used by advanceClock', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 30, lastActionMinute: 0 } : i)),
+    }))
+    useSimStore.getState().setResponseModelOverride('norepinephrine', 20) // scenario default is 6
+    useSimStore.getState().advanceClock(30)
+    // baseline 57 + up to 20 (norepi at its own max, fraction 1) → well above the
+    // scenario's own tuned ceiling of 57+6=63.
+    expect(useSimStore.getState().vitals.map).toBeGreaterThan(63)
+  })
+
+  it('clearResponseModelOverride reverts to the scenario default', () => {
+    useSimStore.getState().setResponseModelOverride('norepinephrine', 20)
+    useSimStore.getState().clearResponseModelOverride('norepinephrine')
+    expect(useSimStore.getState().responseModelOverrides.norepinephrine).toBeUndefined()
+  })
+})
+
+describe('store — facilitator deterioration force-buttons', () => {
+  it('forceImprove reduces the deterioration offset and immediately raises MAP by the same amount', () => {
+    useSimStore.setState({ deteriorationOffset: 10, vitals: { ...useSimStore.getState().vitals, map: 50 } })
+    useSimStore.getState().forceImprove(4)
+    const state = useSimStore.getState()
+    expect(state.deteriorationOffset).toBe(6)
+    expect(state.vitals.map).toBe(54)
+  })
+
+  it('forceImprove never reduces the offset below zero', () => {
+    useSimStore.setState({ deteriorationOffset: 2 })
+    useSimStore.getState().forceImprove(10)
+    expect(useSimStore.getState().deteriorationOffset).toBe(0)
+  })
+
+  it('forceWorsen increases the deterioration offset and immediately lowers MAP by the same amount', () => {
+    useSimStore.setState({ deteriorationOffset: 0, vitals: { ...useSimStore.getState().vitals, map: 60 } })
+    useSimStore.getState().forceWorsen(4)
+    const state = useSimStore.getState()
+    expect(state.deteriorationOffset).toBe(4)
+    expect(state.vitals.map).toBe(56)
+  })
+
+  it('forceWorsen never exceeds the scenario maxDrop', () => {
+    const maxDrop = useSimStore.getState().scenario.deterioration.maxDrop
+    useSimStore.setState({ deteriorationOffset: maxDrop - 2 })
+    useSimStore.getState().forceWorsen(10)
+    expect(useSimStore.getState().deteriorationOffset).toBe(maxDrop)
+  })
+})
+
+describe('store — facilitator order editing', () => {
+  it('updateOrder edits maxDose/increment/interval/target and logs it', () => {
+    useSimStore.getState().updateOrder(NOREPI_ORDER_ID, { maxDose: 40, increment: 1, intervalMinMinutes: 5, targetValue: 70 })
+    const order = useSimStore.getState().orders.find((o) => o.id === NOREPI_ORDER_ID)!
+    expect(order.maxDose).toBe(40)
+    expect(order.increment).toBe(1)
+    expect(order.interval.minMinutes).toBe(5)
+    expect(order.target.value).toBe(70)
+    expect(useSimStore.getState().log.some((e) => /Facilitator edited the Norepinephrine order/.test(e.summary))).toBe(
+      true,
+    )
+  })
+
+  it('leaves fields not included in the patch untouched', () => {
+    const before = useSimStore.getState().orders.find((o) => o.id === NOREPI_ORDER_ID)!
+    useSimStore.getState().updateOrder(NOREPI_ORDER_ID, { maxDose: 40 })
+    const after = useSimStore.getState().orders.find((o) => o.id === NOREPI_ORDER_ID)!
+    expect(after.increment).toBe(before.increment)
+    expect(after.interval).toEqual(before.interval)
+    expect(after.target).toEqual(before.target)
+  })
+
+  it('does nothing for an unknown orderId', () => {
+    const before = useSimStore.getState().orders
+    useSimStore.getState().updateOrder('not-a-real-order', { maxDose: 999 })
+    expect(useSimStore.getState().orders).toEqual(before)
   })
 })

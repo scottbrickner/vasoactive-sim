@@ -17,6 +17,18 @@ export type Phase = 'intro' | 'sim' | 'debrief'
  */
 export type SimMode = 'training' | 'validation'
 
+/**
+ * Records who's proctoring a facilitated session and when proctoring started — a
+ * single bound record (unlike zoll-r-series-simulator's two loose, unbound fields).
+ * Purely a record, not a gate: a session can run with `proctor: null` for standalone
+ * solo practice.
+ */
+export interface ProctorRecord {
+  name: string
+  /** ISO 8601 timestamp of when "Start proctoring" was pressed. */
+  recordedAt: string
+}
+
 /** Placeholder header readout. Real values will be driven by the physiology engine (Phase 4). */
 export interface HeaderReadout {
   /** Elapsed simulation time, in minutes. */
