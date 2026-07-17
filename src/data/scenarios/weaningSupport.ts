@@ -132,10 +132,13 @@ export const WEANING_SUPPORT: ScenarioConfig = {
   // `startingVitals.map` itself (see engine/physiology.ts's projectMap, which adds
   // these on TOP of startingVitals.map). Still enough that down-titrating any agent
   // measurably eases MAP toward target — the real risk this scenario is teaching.
+  // HR/SpO2 ceilings kept just as modest as MAP's here (see the comment above) — the
+  // point is a real, felt signal if weaned too fast (HR creeps back up as a
+  // pressor's contribution shrinks), not a dramatic swing.
   responseModel: {
-    norepinephrine: { maxMapContribution: 2 },
-    vasopressin: { maxMapContribution: 2 },
-    phenylephrine: { maxMapContribution: 3 },
+    norepinephrine: { maxMapContribution: 2, maxHrContribution: -1, maxSpo2Contribution: 0.5 },
+    vasopressin: { maxMapContribution: 2, maxHrContribution: -1, maxSpo2Contribution: 0.5 },
+    phenylephrine: { maxMapContribution: 3, maxHrContribution: -1.5, maxSpo2Contribution: 0.5 },
   },
   // Gentle but nonzero — only accrues if every agent is ever fully discontinued at
   // once, which stays a real (if edge-case) risk of weaning too aggressively.

@@ -275,13 +275,17 @@ export interface PriorVitalsPoint {
 }
 
 /**
- * Physiology tuning for one drug in this scenario: the MAP (mmHg) it contributes once
- * fully responded, at its own ordered maximum dose. Deliberately scenario data, not
- * hardcoded in engine/physiology.ts (see that module's doc comment) — different
- * scenarios/patients respond differently to the same drug.
+ * Physiology tuning for one drug in this scenario: the vital-sign contribution(s) it
+ * makes once fully responded, at its own ordered maximum dose. Deliberately scenario
+ * data, not hardcoded in engine/physiology.ts (see that module's doc comment) —
+ * different scenarios/patients respond differently to the same drug.
  */
 export interface ResponseModelEntry {
   maxMapContribution: number
+  /** HR change (bpm) at max dose — typically NEGATIVE (a pressor easing tachycardia as MAP normalizes). Omit for no HR effect. */
+  maxHrContribution?: number
+  /** SpO2 change (%) at max dose — typically small and positive (perfusion/oxygenation improving alongside MAP). Omit for no SpO2 effect. */
+  maxSpo2Contribution?: number
 }
 
 /** A complete case: patient, starting state, and the titratable order(s) that govern it. */
@@ -326,11 +330,13 @@ export interface SimState {
   /** Order-adherence flags, keyed by the action's LogEntry id. */
   adherenceFlags: Record<string, boolean>
   /**
-   * Physiology interpolation anchor: the MAP value and sim minute at the most recent
-   * dose-changing action, from which advanceClock interpolates toward the newly
-   * projected MAP. Null before the first titration.
+   * Physiology interpolation anchor: the MAP/HR/SpO2 values and sim minute at the most
+   * recent dose-changing action, from which advanceClock interpolates toward the newly
+   * projected values for each. Null before the first titration. HR/SpO2's anchors hold
+   * the "clean" pre-jitter value — periodicVariability layers on top afterward, same as
+   * it always has for HR.
    */
-  lastPhysiologyUpdate: { minute: number; map: number } | null
+  lastPhysiologyUpdate: { minute: number; map: number; hr: number; spo2: number } | null
   /** Cumulative mmHg MAP has dropped below baseline from untreated time — see ScenarioConfig.deterioration. Monotonically grows toward `maxDrop` while untreated, frozen otherwise. */
   deteriorationOffset: number
   /** The in-progress Block of Charting episode, if any (CP 4-156's emergent pathway). */

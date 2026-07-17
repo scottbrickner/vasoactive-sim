@@ -45,7 +45,7 @@ describe('store — initiation', () => {
     expect(norepiInfusion().status).toBe('infusing')
     expect(norepiInfusion().rate).toBe(0.5)
     expect(norepiInfusion().lastActionMinute).toBe(0)
-    expect(state.lastPhysiologyUpdate).toEqual({ minute: 0, map: 57 })
+    expect(state.lastPhysiologyUpdate).toEqual({ minute: 0, map: 57, hr: 118, spo2: 96 })
     expect(state.feedback).toMatchObject({ tone: 'success', title: 'Infusion started' })
     const marEntry = state.log.find((e) => e.type === 'documentation' && e.location === 'MAR' && /Initial rate/.test(e.summary))
     expect(marEntry).toBeDefined()
@@ -383,7 +383,7 @@ describe('store — physiology wiring', () => {
   it('advanceClock moves MAP toward the projected total once the response lag has fully elapsed', () => {
     useSimStore.setState((s) => ({
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
-      lastPhysiologyUpdate: { minute: 0, map: 57 },
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: 118, spo2: 96 },
     }))
     useSimStore.getState().advanceClock(5) // scenario response lag is 2-5 min
     const state = useSimStore.getState()
@@ -394,7 +394,7 @@ describe('store — physiology wiring', () => {
   it('leaves MAP unmoved before the response lag has begun', () => {
     useSimStore.setState((s) => ({
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
-      lastPhysiologyUpdate: { minute: 0, map: 57 },
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: 118, spo2: 96 },
     }))
     useSimStore.getState().advanceClock(1) // before minMinutes (2)
     expect(useSimStore.getState().vitals.map).toBe(57)
@@ -418,7 +418,7 @@ describe('store — physiology wiring', () => {
           rateBeforePause: null,
         },
       ],
-      lastPhysiologyUpdate: { minute: 0, map: 63 },
+      lastPhysiologyUpdate: { minute: 0, map: 63, hr: 118, spo2: 96 },
     }))
     useSimStore.getState().advanceClock(5)
     expect(useSimStore.getState().vitals.map).toBeGreaterThanOrEqual(65)
@@ -429,7 +429,7 @@ describe('store — physiology wiring', () => {
     const startingPulsePressure = startingVitals.sbp - startingVitals.dbp
     useSimStore.setState((s) => ({
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
-      lastPhysiologyUpdate: { minute: 0, map: 57 },
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: 118, spo2: 96 },
     }))
     useSimStore.getState().advanceClock(5) // MAP moves from 57 to 63 (norepi alone)
     const { sbp, dbp, map } = useSimStore.getState().vitals
@@ -437,6 +437,68 @@ describe('store — physiology wiring', () => {
     expect(sbp).not.toBe(startingVitals.sbp)
     expect(dbp).not.toBe(startingVitals.dbp)
     expect(sbp - dbp).toBe(startingPulsePressure)
+  })
+
+  it('HR trends down and SpO2 trends up as norepinephrine fully responds (Phase 12)', () => {
+    const startingHr = useSimStore.getState().scenario.startingVitals.hr
+    const startingSpo2 = useSimStore.getState().scenario.startingVitals.spo2
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: startingHr, spo2: startingSpo2 },
+    }))
+    useSimStore.getState().advanceClock(5) // fully past the response lag (2-5 min)
+    const { hr, spo2 } = useSimStore.getState().vitals
+    // norepi's tuned maxHrContribution is -12, maxSpo2Contribution is +1 — HR eases
+    // down from the tachycardic baseline, SpO2 nudges up, both by a plausible amount
+    // (not exactly baseline-12/baseline+1, since periodicVariability jitter also
+    // applies to HR — only SpO2 stays jitter-free and lands on the exact value).
+    expect(hr).toBeLessThan(startingHr)
+    expect(spo2).toBe(startingSpo2 + 1)
+  })
+
+  it('leaves HR/SpO2 at their starting values before the response lag has begun', () => {
+    const startingHr = useSimStore.getState().scenario.startingVitals.hr
+    const startingSpo2 = useSimStore.getState().scenario.startingVitals.spo2
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: startingHr, spo2: startingSpo2 },
+    }))
+    useSimStore.getState().advanceClock(1) // before minMinutes (2)
+    expect(useSimStore.getState().vitals.spo2).toBe(startingSpo2)
+  })
+
+  it('a drug with no maxHrContribution/maxSpo2Contribution tuned leaves HR/SpO2 driven only by baseline+jitter', () => {
+    const startingHr = useSimStore.getState().scenario.startingVitals.hr
+    const startingSpo2 = useSimStore.getState().scenario.startingVitals.spo2
+    useSimStore.setState((s) => ({
+      // Strip norepi's HR/SpO2 tuning for this test only — confirms the omitted-field
+      // default (0 contribution) actually applies, not just "happens to be untested."
+      scenario: {
+        ...s.scenario,
+        responseModel: {
+          ...s.scenario.responseModel,
+          norepinephrine: { maxMapContribution: s.scenario.responseModel.norepinephrine!.maxMapContribution },
+        },
+      },
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: startingHr, spo2: startingSpo2 },
+    }))
+    useSimStore.getState().advanceClock(5)
+    // SpO2 is jitter-free, so with zero contribution it lands exactly on baseline.
+    expect(useSimStore.getState().vitals.spo2).toBe(startingSpo2)
+  })
+
+  it('forceImprove/forceWorsen preserve the HR/SpO2 anchor, only touching MAP', () => {
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 15 } : i)),
+      lastPhysiologyUpdate: { minute: 0, map: 60, hr: 110, spo2: 97 },
+      deteriorationOffset: 4,
+    }))
+    useSimStore.getState().forceImprove(2)
+    const anchor = useSimStore.getState().lastPhysiologyUpdate
+    expect(anchor?.hr).toBe(110)
+    expect(anchor?.spo2).toBe(97)
+    expect(anchor?.map).toBe(useSimStore.getState().vitals.map)
   })
 })
 

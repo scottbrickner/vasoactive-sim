@@ -12,12 +12,12 @@ export interface PhilipsMonitorProps {
 /**
  * Faithful (not stylized) replica of a Philips IntelliVue bedside monitor. Waveforms
  * are continuously animated (see Waveform.tsx) but the shapes themselves are still
- * decorative, not derived from real waveform data. MAP/SBP/DBP respond to titration;
- * HR/SBP/DBP additionally carry natural periodic variability layered on top (see
- * state/store.ts's advanceClock and engine/physiology.ts's periodicVariability) — MAP
- * itself deliberately never jitters, since clinical logic keys off its exact value.
- * SpO2/rhythm stay frozen at scenario starting values until Phase 12 makes HR/SpO2
- * actually respond to titration (a different thing from 8d's variability).
+ * decorative, not derived from real waveform data. MAP/SBP/DBP/HR/SpO2 all respond to
+ * titration (see ScenarioConfig.responseModel + state/store.ts's advanceClock); HR/
+ * SBP/DBP additionally carry natural periodic variability layered on top of that
+ * response (see engine/physiology.ts's periodicVariability) — MAP itself deliberately
+ * never jitters, since clinical logic keys off its exact value. Rhythm label stays
+ * frozen at the scenario's starting value — this monitor doesn't model rhythm changes.
  */
 export function PhilipsMonitor({ vitals, startingVitals }: PhilipsMonitorProps) {
   const cycleSeconds = 60 / vitals.hr

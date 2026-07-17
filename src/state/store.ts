@@ -64,6 +64,27 @@ function contributionFor(
 }
 
 /**
+ * HR/SpO2 siblings of contributionFor — same sqrt-response shape, no facilitator
+ * override (Phase 10's `responseModelOverrides` stays MAP-only; out of this phase's
+ * scope). `maxHrContribution` is typically negative (easing tachycardia as MAP
+ * normalizes) — `projectDoseResponse` handles a negative ceiling the same way it
+ * handles a positive one, since it's just a scale factor on the sqrt curve.
+ */
+function hrContributionFor(infusion: Infusion, scenario: ScenarioConfig): number {
+  const maxHrContribution = scenario.responseModel[infusion.drugId]?.maxHrContribution
+  if (maxHrContribution == null) return 0
+  const drug = getDrug(infusion.drugId)
+  return projectDoseResponse(infusion.rate, drug.maxDose, maxHrContribution)
+}
+
+function spo2ContributionFor(infusion: Infusion, scenario: ScenarioConfig): number {
+  const maxSpo2Contribution = scenario.responseModel[infusion.drugId]?.maxSpo2Contribution
+  if (maxSpo2Contribution == null) return 0
+  const drug = getDrug(infusion.drugId)
+  return projectDoseResponse(infusion.rate, drug.maxDose, maxSpo2Contribution)
+}
+
+/**
  * Sequence > 1 orders activate once every lower-sequence order's infusion is at (or
  * past) `order.activationThreshold` of its own max — defaults to 1 ("at its own max")
  * when omitted — with target still unmet.
@@ -166,7 +187,9 @@ function computeApplyUpdate(
   infusion: Infusion | null,
   action: TitrationAction,
   dose: number,
-): Pick<ApplyStateSlice, 'infusions' | 'log'> & { lastPhysiologyUpdate: { minute: number; map: number } } {
+): Pick<ApplyStateSlice, 'infusions' | 'log'> & {
+  lastPhysiologyUpdate: { minute: number; map: number; hr: number; spo2: number }
+} {
   const nextInfusion: Infusion = infusion
     ? {
         ...infusion,
@@ -211,7 +234,7 @@ function computeApplyUpdate(
   return {
     infusions,
     log: [...s.log, ...marEntry],
-    lastPhysiologyUpdate: { minute: s.clockMinutes, map: s.vitals.map },
+    lastPhysiologyUpdate: { minute: s.clockMinutes, map: s.vitals.map, hr: s.vitals.hr, spo2: s.vitals.spo2 },
   }
 }
 
@@ -248,7 +271,7 @@ interface SimStore {
   log: LogEntry[]
   verificationFlags: Record<string, boolean>
   adherenceFlags: Record<string, boolean>
-  lastPhysiologyUpdate: { minute: number; map: number } | null
+  lastPhysiologyUpdate: { minute: number; map: number; hr: number; spo2: number } | null
   /** Cumulative mmHg MAP has dropped below baseline from untreated time — see ScenarioConfig.deterioration. */
   deteriorationOffset: number
   activeBlockOfCharting: BlockOfChartingRecord | null
@@ -338,7 +361,7 @@ function initialSimFields(
     log: [] as LogEntry[],
     verificationFlags: {} as Record<string, boolean>,
     adherenceFlags: {} as Record<string, boolean>,
-    lastPhysiologyUpdate: null as { minute: number; map: number } | null,
+    lastPhysiologyUpdate: null as { minute: number; map: number; hr: number; spo2: number } | null,
     deteriorationOffset: 0,
     activeBlockOfCharting: null as BlockOfChartingRecord | null,
     blockOfChartingHistory: [] as BlockOfChartingRecord[],
@@ -405,7 +428,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
         deteriorationOffset: s.deteriorationOffset - delta,
         vitals: { ...s.vitals, map: s.vitals.map + delta },
         lastPhysiologyUpdate: s.lastPhysiologyUpdate
-          ? { minute: s.clockMinutes, map: s.vitals.map + delta }
+          ? { ...s.lastPhysiologyUpdate, minute: s.clockMinutes, map: s.vitals.map + delta }
           : s.lastPhysiologyUpdate,
       }
     }),
@@ -418,7 +441,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
         deteriorationOffset: s.deteriorationOffset + delta,
         vitals: { ...s.vitals, map: s.vitals.map - delta },
         lastPhysiologyUpdate: s.lastPhysiologyUpdate
-          ? { minute: s.clockMinutes, map: s.vitals.map - delta }
+          ? { ...s.lastPhysiologyUpdate, minute: s.clockMinutes, map: s.vitals.map - delta }
           : s.lastPhysiologyUpdate,
       }
     }),
@@ -810,18 +833,30 @@ export const useSimStore = create<SimStore>((set, get) => ({
     const state = get()
     const nextMinute = advance(state.clockMinutes, byMinutes)
 
-    // Only MAP is modeled by the physiology engine (see engine/physiology.ts) — the
-    // rest of the vitals stay at their scenario starting values through the sim.
-    const contributions = state.infusions
-      .filter((i) => i.status === 'infusing')
-      .map((i) => contributionFor(i, state.scenario, state.responseModelOverrides))
-    const projectedMap = projectMap(state.scenario.startingVitals.map, contributions)
+    // MAP, HR, and SpO2 are each modeled by the physiology engine — a pressor doesn't
+    // just raise MAP, it also eases tachycardia and (mildly) improves oxygenation as
+    // perfusion normalizes (see ScenarioConfig.responseModel's maxHrContribution/
+    // maxSpo2Contribution). SBP/DBP stay MAP-derived (see deriveBloodPressure below).
+    const infusingInfusions = state.infusions.filter((i) => i.status === 'infusing')
+    const mapContributions = infusingInfusions.map((i) => contributionFor(i, state.scenario, state.responseModelOverrides))
+    const projectedMap = projectMap(state.scenario.startingVitals.map, mapContributions)
+    const hrContributions = infusingInfusions.map((i) => hrContributionFor(i, state.scenario))
+    const projectedHr = projectMap(state.scenario.startingVitals.hr, hrContributions)
+    const spo2Contributions = infusingInfusions.map((i) => spo2ContributionFor(i, state.scenario))
+    const projectedSpo2 = projectMap(state.scenario.startingVitals.spo2, spo2Contributions)
 
     let map = state.vitals.map
+    // "Clean" (pre-jitter) HR/SpO2 baselines — periodicVariability layers on top of
+    // these afterward, same as it always has for HR; SpO2 stays jitter-free (Phase 8d
+    // never added SpO2 jitter, and this phase doesn't either).
+    let hrBase = state.scenario.startingVitals.hr
+    let spo2Base = state.scenario.startingVitals.spo2
     if (state.lastPhysiologyUpdate) {
       const elapsed = minutesElapsed(nextMinute, state.lastPhysiologyUpdate.minute)
       const fraction = responseFraction(elapsed, state.scenario.responseLagMinutes)
       map = stepTowardTarget(state.lastPhysiologyUpdate.map, projectedMap, fraction)
+      hrBase = stepTowardTarget(state.lastPhysiologyUpdate.hr, projectedHr, fraction)
+      spo2Base = stepTowardTarget(state.lastPhysiologyUpdate.spo2, projectedSpo2, fraction)
     }
 
     // Untreated septic shock doesn't hold steady — MAP keeps declining, independent of
@@ -877,19 +912,19 @@ export const useSimStore = create<SimStore>((set, get) => ({
       }
     }
 
-    // Natural beat-to-beat/respiratory variation, layered on top of the clean values
-    // above — deliberately never applied to `map` itself, since every clinical
-    // decision (target-met checks, the deterioration trigger, this function's own
-    // `lastPhysiologyUpdate` interpolation anchor) keys off it; jittering MAP would
-    // make "target reached" flicker tick to tick. HR has no decision logic on its
-    // exact value, so it's safe to jitter directly. SBP/DBP get the SAME jitter value
-    // (a parallel shift) rather than independent jitter each, preserving the pulse
-    // pressure deriveBloodPressure already guarantees.
+    // Natural beat-to-beat/respiratory variation, layered on top of the clean
+    // (titration-responsive) values above — deliberately never applied to `map`
+    // itself, since every clinical decision (target-met checks, the deterioration
+    // trigger, this function's own `lastPhysiologyUpdate` interpolation anchor) keys
+    // off it; jittering MAP would make "target reached" flicker tick to tick. HR has
+    // no decision logic on its exact value, so it's safe to jitter directly. SBP/DBP
+    // get the SAME jitter value (a parallel shift) rather than independent jitter
+    // each, preserving the pulse pressure deriveBloodPressure already guarantees.
     // A facilitator's live vital override (see Facilitator.tsx's OverrideControls)
     // takes precedence over the scenario's own baseline+jitter computation — it's a
     // standing override, not a one-off, so it keeps winning every tick until cleared.
     const { hr: hrOverride, sbp: sbpOverride, dbp: dbpOverride, spo2: spo2Override } = state.vitalOverrides
-    const hr = hrOverride ?? Math.round(state.scenario.startingVitals.hr + periodicVariability(nextMinute, 2.5, 7))
+    const hr = hrOverride ?? Math.round(hrBase + periodicVariability(nextMinute, 2.5, 7))
     const bpJitter = Math.round(periodicVariability(nextMinute, 4, 11, 3))
     const { sbp: baseSbp, dbp: baseDbp } = deriveBloodPressure(map, state.scenario.startingVitals)
     const nextVitals = {
@@ -898,7 +933,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       hr,
       sbp: sbpOverride ?? baseSbp + bpJitter,
       dbp: dbpOverride ?? baseDbp + bpJitter,
-      spo2: spo2Override ?? state.vitals.spo2,
+      spo2: spo2Override ?? spo2Base,
     }
     set({
       clockMinutes: nextMinute,
@@ -966,7 +1001,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       ),
       log: [...s.log, entry],
       adherenceFlags: { ...s.adherenceFlags, [entry.id]: true },
-      lastPhysiologyUpdate: { minute: s.clockMinutes, map: s.vitals.map },
+      lastPhysiologyUpdate: { minute: s.clockMinutes, map: s.vitals.map, hr: s.vitals.hr, spo2: s.vitals.spo2 },
       feedback: {
         tone: 'success',
         title: 'Infusion restarted',

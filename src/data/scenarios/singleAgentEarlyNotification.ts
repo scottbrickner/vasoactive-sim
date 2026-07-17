@@ -73,7 +73,7 @@ export const SINGLE_AGENT_EARLY_NOTIFICATION: ScenarioConfig = {
   // Illustrative response ceiling — norepinephrine alone, at its ordered maximum, is
   // sufficient this time (58 + 8 = 66 >= 65), unlike the flagship scenario.
   responseModel: {
-    norepinephrine: { maxMapContribution: 8 },
+    norepinephrine: { maxMapContribution: 8, maxHrContribution: -14, maxSpo2Contribution: 2 },
   },
   deterioration: { ratePerMinute: 0.4, maxDrop: 12 },
   objective:

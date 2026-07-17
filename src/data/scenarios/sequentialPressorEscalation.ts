@@ -84,8 +84,10 @@ export const SEQUENTIAL_PRESSOR_ESCALATION: ScenarioConfig = {
   // Norepinephrine alone, even at its ordered maximum, is deliberately tuned to fall
   // short of target (55 + 6 = 61 < 65) — phenylephrine closes the gap (61 + 6 = 67 >= 65).
   responseModel: {
-    norepinephrine: { maxMapContribution: 6 },
-    phenylephrine: { maxMapContribution: 6 },
+    norepinephrine: { maxMapContribution: 6, maxHrContribution: -10, maxSpo2Contribution: 1 },
+    // Pure alpha-agonism plus the baroreceptor reflex from a rising SVR means
+    // phenylephrine tends to ease (not add to) HR too, not just close the MAP gap.
+    phenylephrine: { maxMapContribution: 6, maxHrContribution: -8, maxSpo2Contribution: 1 },
   },
   deterioration: { ratePerMinute: 0.5, maxDrop: 15 },
   objective:

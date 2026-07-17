@@ -89,9 +89,13 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
   // maximum, is deliberately tuned to fall short of target (57 + 6 = 63 < 65) — this is
   // what drives the need for agent 2. Adding vasopressin at its max closes the gap
   // (63 + 5 = 68 >= 65), matching CLINICAL_SPEC.md's worked example.
+  // HR/SpO2 contributions (Phase 12) layer on top of the MAP response — a pressor
+  // doesn't just raise MAP, it also eases the compensatory tachycardia (negative HR
+  // contribution) and modestly improves oxygenation as perfusion normalizes (small
+  // positive SpO2 contribution).
   responseModel: {
-    norepinephrine: { maxMapContribution: 6 },
-    vasopressin: { maxMapContribution: 5 },
+    norepinephrine: { maxMapContribution: 6, maxHrContribution: -12, maxSpo2Contribution: 1 },
+    vasopressin: { maxMapContribution: 5, maxHrContribution: -6, maxSpo2Contribution: 1 },
   },
   // Illustrative deterioration curve: untreated septic shock doesn't hold steady at
   // 57 — MAP declines further the longer no agent is actively infusing. 0.5 mmHg/min
