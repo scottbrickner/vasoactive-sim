@@ -5,13 +5,14 @@ import type { Infusion } from '../../state/types'
 
 export interface CernerMARProps {
   infusions: Infusion[]
-  onRequestBeginBag: (infusionId: string) => void
+  /** Direct/ungated — Begin Bag hangs the bag and charts in MAR; verification happens once, when the starting dose is programmed. */
+  onCompleteBeginBag: (infusionId: string) => void
   /** True while a verification confirmation is pending elsewhere on the page. */
   disabled?: boolean
 }
 
 /** Faithful (not stylized) replica of the Cerner MAR — Begin Bag + initial rate (CP 4-156). */
-export function CernerMAR({ infusions, onRequestBeginBag, disabled }: CernerMARProps) {
+export function CernerMAR({ infusions, onCompleteBeginBag, disabled }: CernerMARProps) {
   return (
     <div className="overflow-hidden rounded-md border" style={{ borderColor: cerner.gridLine }}>
       <div
@@ -52,8 +53,8 @@ export function CernerMAR({ infusions, onRequestBeginBag, disabled }: CernerMARP
                     ) : (
                       <div className="flex items-center gap-2">
                         <BeginBagBadge complete={false} />
-                        <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onRequestBeginBag(infusion.id)}>
-                          Complete Begin Bag
+                        <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onCompleteBeginBag(infusion.id)}>
+                          Begin Bag
                         </Button>
                       </div>
                     )}

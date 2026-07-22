@@ -64,12 +64,14 @@ describe('store — initiation', () => {
     expect(state.feedback?.title).toBe('Off-order — not applied')
   })
 
-  it('sets verificationFlags and adherenceFlags keyed by the action log entry', () => {
+  it('sets verificationFlags and adherenceFlags keyed by the initiate action log entry (not Begin Bag, which is no longer its own verification event)', () => {
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
     const state = useSimStore.getState()
-    const actionEntry = state.log.find((e) => e.type === 'action')!
+    const actionEntry = state.log.find((e) => e.type === 'action' && e.doseAction === 'initiate')!
     expect(state.verificationFlags[actionEntry.id]).toBe(true)
     expect(state.adherenceFlags[actionEntry.id]).toBe(true)
+    const beginBagEntry = state.log.find((e) => e.type === 'action' && e.doseAction == null)!
+    expect(state.verificationFlags[beginBagEntry.id]).toBeUndefined()
   })
 })
 
@@ -80,15 +82,20 @@ describe('store — titration mechanics', () => {
   })
 
   it('rejects titrating sooner than the minimum interval (training-mode override, cancelled)', () => {
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // 0 minutes elapsed; needs 3
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // valid — auto-advances, landing exactly at the interval boundary
+    // Auto-advance means a real next action never lands "too soon" on its own — force 0
+    // elapsed since the last change to exercise a genuine interval violation.
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, lastActionMinute: s.clockMinutes } : i)),
+    }))
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5)
     expect(useSimStore.getState().pendingOverride?.violations.intervalTooSoon).toBe(true)
     useSimStore.getState().cancelDoseOverride()
-    expect(norepiInfusion().rate).toBe(0.5)
+    expect(norepiInfusion().rate).toBe(1)
     expect(useSimStore.getState().feedback?.title).toBe('Off-order — not applied')
   })
 
   it('rejects an incorrect increment (training-mode override, cancelled)', () => {
-    useSimStore.getState().advanceClock(3)
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 2) // delta 1.5, ordered increment 0.5
     expect(useSimStore.getState().pendingOverride?.violations.wrongIncrement).toBe(true)
     useSimStore.getState().cancelDoseOverride()
@@ -97,7 +104,6 @@ describe('store — titration mechanics', () => {
   })
 
   it('applies a correctly timed, correctly incremented titration', () => {
-    useSimStore.getState().advanceClock(3)
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1)
     const state = useSimStore.getState()
     expect(norepiInfusion().rate).toBe(1)
@@ -106,7 +112,6 @@ describe('store — titration mechanics', () => {
   })
 
   it('blocks a dose above the Guardrails hard limit (the drug maximum) regardless of order status', () => {
-    useSimStore.getState().advanceClock(3)
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 999)
     expect(norepiInfusion().rate).toBe(0.5)
     expect(useSimStore.getState().feedback).toMatchObject({ tone: 'danger', title: 'Blocked by Guardrails' })
@@ -114,62 +119,86 @@ describe('store — titration mechanics', () => {
 })
 
 describe('store — auto-advance by order interval', () => {
+  it('a successfully applied initiate auto-advances the clock by the order interval', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate — norepi's interval is 3 min
+    expect(useSimStore.getState().clockMinutes).toBe(3)
+  })
+
   it('a successfully applied titrate auto-advances the clock by the order interval', () => {
     useSimStore.getState().completeBeginBag(norepiInfusion().id)
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0 — no auto-advance
-    expect(useSimStore.getState().clockMinutes).toBe(0)
-    useSimStore.getState().advanceClock(3) // manual, t=3
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // titrate — norepi's interval is 3 min
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate, t=0 -> 3
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // titrate — interval already satisfied
     expect(useSimStore.getState().clockMinutes).toBe(6)
   })
 
   it('does not auto-advance when a titrate is rejected (Guardrails hard limit)', () => {
     useSimStore.getState().completeBeginBag(norepiInfusion().id)
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
-    useSimStore.getState().advanceClock(3)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // t=0 -> 3
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 999)
     expect(useSimStore.getState().clockMinutes).toBe(3)
   })
 
   it('does not auto-advance a deferred training-mode override that is cancelled', () => {
     useSimStore.getState().completeBeginBag(norepiInfusion().id)
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon — deferred
-    expect(useSimStore.getState().clockMinutes).toBe(0)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // t=0 -> 3
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // valid — auto-advances to 6
+    // Force 0 elapsed since the last change — a real next action never lands "too soon"
+    // on its own now that every successful dose change auto-advances by the interval.
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, lastActionMinute: s.clockMinutes } : i)),
+    }))
+    const clockBefore = useSimStore.getState().clockMinutes
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5) // too soon — deferred
+    expect(useSimStore.getState().clockMinutes).toBe(clockBefore)
     useSimStore.getState().cancelDoseOverride()
-    expect(useSimStore.getState().clockMinutes).toBe(0)
+    expect(useSimStore.getState().clockMinutes).toBe(clockBefore)
   })
 
   it('auto-advances once a deferred training-mode override is confirmed', () => {
     useSimStore.getState().completeBeginBag(norepiInfusion().id)
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon — deferred
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // t=0 -> 3
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // valid — auto-advances to 6
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, lastActionMinute: s.clockMinutes } : i)),
+    }))
+    const clockBefore = useSimStore.getState().clockMinutes
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5) // too soon — deferred
+    expect(useSimStore.getState().pendingOverride).not.toBeNull()
     useSimStore.getState().confirmDoseOverride()
-    expect(useSimStore.getState().clockMinutes).toBe(3)
+    expect(useSimStore.getState().clockMinutes).toBe(clockBefore + 3)
   })
 })
 
 describe('store — training/validation mode override flow', () => {
   beforeEach(() => {
     useSimStore.getState().completeBeginBag(norepiInfusion().id)
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate, auto-advances to t=3
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // valid titrate — auto-advances to t=6
+    // Every successful dose change now auto-advances the clock by exactly the order's
+    // interval, so two consecutive real actions always land exactly at the interval
+    // boundary — never "too soon" on their own. Force 0 elapsed since the last change so
+    // the tests below can exercise a genuine interval violation.
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, lastActionMinute: s.clockMinutes } : i)),
+    }))
   })
 
   it('training mode defers an off-order titration, leaving the infusion untouched', () => {
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5) // interval too soon (0 min since t=6)
     const state = useSimStore.getState()
     expect(state.pendingOverride).not.toBeNull()
-    expect(norepiInfusion().rate).toBe(0.5)
-    expect(state.log.some((e) => e.dose === 1)).toBe(false) // deferred — not logged yet
+    expect(norepiInfusion().rate).toBe(1)
+    expect(state.log.some((e) => e.dose === 1.5)).toBe(false) // deferred — not logged yet
   })
 
   it('confirmDoseOverride applies the dose and logs it as overridden, excluded from adherence', () => {
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5) // interval too soon
     useSimStore.getState().confirmDoseOverride()
     const state = useSimStore.getState()
-    expect(norepiInfusion().rate).toBe(1)
+    expect(norepiInfusion().rate).toBe(1.5)
     expect(state.pendingOverride).toBeNull()
-    const entry = state.log.find((e) => e.dose === 1)!
+    const entry = state.log.find((e) => e.dose === 1.5)!
     expect(entry.outcome).toBe('applied')
     expect(entry.overridden).toBe(true)
     expect(state.adherenceFlags[entry.id]).toBe(false)
@@ -177,22 +206,22 @@ describe('store — training/validation mode override flow', () => {
   })
 
   it('cancelDoseOverride logs the attempt as off-order without applying it', () => {
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5) // interval too soon
     useSimStore.getState().cancelDoseOverride()
     const state = useSimStore.getState()
-    expect(norepiInfusion().rate).toBe(0.5)
-    const entry = state.log.find((e) => e.dose === 1)!
+    expect(norepiInfusion().rate).toBe(1)
+    const entry = state.log.find((e) => e.dose === 1.5)!
     expect(entry.outcome).toBe('off-order')
     expect(entry.overridden).toBeUndefined()
   })
 
   it('validation mode applies an off-order titration silently, scored as overridden', () => {
     useSimStore.setState({ mode: 'validation' })
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // interval too soon
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5) // interval too soon
     const state = useSimStore.getState()
     expect(state.pendingOverride).toBeNull()
-    expect(norepiInfusion().rate).toBe(1)
-    const entry = state.log.find((e) => e.dose === 1)!
+    expect(norepiInfusion().rate).toBe(1.5)
+    const entry = state.log.find((e) => e.dose === 1.5)!
     expect(entry.outcome).toBe('applied')
     expect(entry.overridden).toBe(true)
     expect(state.adherenceFlags[entry.id]).toBe(false)
@@ -230,12 +259,12 @@ describe('store — early-notification threshold', () => {
     }))
   })
 
-  it('marks earlyNotificationDue and fires the notify-prompt the tick the threshold is crossed', () => {
+  it('marks earlyNotificationDue and opens the checkpoint the tick the threshold is crossed', () => {
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9) // 8.5 -> 9 crosses 30*0.3=9
     const state = useSimStore.getState()
     const entry = state.log.find((e) => e.dose === 9)!
     expect(entry.earlyNotificationDue).toBe(true)
-    expect(state.feedback).toMatchObject({ tone: 'warning', title: 'Consider notifying the provider' })
+    expect(state.pendingCheckpoint).toMatchObject({ orderId: NOREPI_ORDER_ID, doseAtTrigger: 9 })
   })
 
   it('does not refire on a later titration once already past the threshold', () => {
@@ -284,7 +313,151 @@ describe('store — early-notification threshold', () => {
     const entry = state.log.find((e) => e.dose === 9.5)!
     expect(entry.overridden).toBe(true)
     expect(entry.earlyNotificationDue).toBe(true)
-    expect(state.feedback).toMatchObject({ tone: 'warning', title: 'Consider notifying the provider' })
+    expect(state.pendingCheckpoint).toMatchObject({ orderId: NOREPI_ORDER_ID, doseAtTrigger: 9.5 })
+  })
+})
+
+describe('store — pacing offer', () => {
+  beforeEach(() => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0
+  })
+
+  it('opens a pacing offer after 3 manual titrations, pointed at the nearest milestone (vasopressin activation at 10)', () => {
+    useSimStore.getState().advanceClock(3)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // 1st
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5) // 2nd
+    expect(useSimStore.getState().pendingPacingOffer).toBeNull()
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 2) // 3rd
+    const offer = useSimStore.getState().pendingPacingOffer
+    expect(offer).toMatchObject({ orderId: NOREPI_ORDER_ID, currentDose: 2, nextDecisionDose: 10 })
+    expect(offer?.nextDecisionLabel).toMatch(/activating Vasopressin/)
+  })
+
+  it('dismissPacingOffer clears it with no LogEntry', () => {
+    useSimStore.getState().advanceClock(3)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 2)
+    const logLengthBefore = useSimStore.getState().log.length
+    useSimStore.getState().dismissPacingOffer()
+    const state = useSimStore.getState()
+    expect(state.pendingPacingOffer).toBeNull()
+    expect(state.log.length).toBe(logLengthBefore)
+  })
+
+  it('runGuidedTitrationLeap works from a pacing offer, same as from a clinical checkpoint', () => {
+    useSimStore.getState().advanceClock(3)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 2)
+    useSimStore.getState().runGuidedTitrationLeap(NOREPI_ORDER_ID, 3)
+    const state = useSimStore.getState()
+    expect(state.pendingPacingOffer).toBeNull()
+    expect(norepiInfusion().rate).toBe(3)
+    expect(state.log.some((e) => e.autoGeneratedByLeap)).toBe(true)
+  })
+
+  it('the counter resets after an offer fires, requiring 3 more manual titrations before the next one', () => {
+    useSimStore.getState().advanceClock(3)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 2) // offer #1 opens
+    useSimStore.getState().dismissPacingOffer()
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 2.5)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 3)
+    expect(useSimStore.getState().pendingPacingOffer).toBeNull()
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 3.5) // 3rd since offer #1
+    expect(useSimStore.getState().pendingPacingOffer).not.toBeNull()
+  })
+
+  it('a leap started BELOW the clinical threshold (via a pacing offer) stops exactly at the crossing dose and opens the clinical checkpoint, rather than sailing past it', () => {
+    useSimStore.setState((s) => ({
+      orders: s.orders.map((o) => (o.id === NOREPI_ORDER_ID ? { ...o, earlyNotificationThreshold: 0.1 } : o)), // crosses at 3
+    }))
+    useSimStore.getState().advanceClock(3)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // 1st
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5) // 2nd
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 2) // 3rd -> pacing offer opens
+    expect(useSimStore.getState().pendingPacingOffer).not.toBeNull()
+    // Ask the leap to go all the way to 9 — it should stop at 3 (the clinical threshold),
+    // not run through it silently.
+    useSimStore.getState().runGuidedTitrationLeap(NOREPI_ORDER_ID, 9)
+    const state = useSimStore.getState()
+    expect(state.pendingPacingOffer).toBeNull()
+    expect(state.pendingCheckpoint).toMatchObject({ orderId: NOREPI_ORDER_ID, doseAtTrigger: 3 })
+    expect(norepiInfusion().rate).toBe(3)
+    const leapEntries = state.log.filter((e) => e.autoGeneratedByLeap && e.doseAction === 'titrate')
+    expect(leapEntries.map((e) => e.dose)).toEqual([2.5, 3])
+  })
+
+  it('a clinical checkpoint crossing takes precedence and resets the pacing counter instead of opening a pacing offer', () => {
+    // Threshold dose = 30 * (2/30) = 2 — crosses exactly on the 3rd manual titration below.
+    useSimStore.setState((s) => ({
+      orders: s.orders.map((o) => (o.id === NOREPI_ORDER_ID ? { ...o, earlyNotificationThreshold: 2 / 30 } : o)),
+    }))
+    useSimStore.getState().advanceClock(3)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1) // 1st
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 1.5) // 2nd
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 2) // 3rd — also crosses the clinical threshold
+    const state = useSimStore.getState()
+    expect(state.pendingCheckpoint).not.toBeNull()
+    expect(state.pendingPacingOffer).toBeNull()
+  })
+})
+
+describe('store — titration checkpoint and guided titration leap', () => {
+  beforeEach(() => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0
+    useSimStore.setState((s) => ({
+      orders: s.orders.map((o) => (o.id === NOREPI_ORDER_ID ? { ...o, earlyNotificationThreshold: 0.3 } : o)),
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 8.5, lastActionMinute: 0 } : i)),
+      clockMinutes: 3,
+    }))
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9) // crosses threshold, opens the checkpoint
+  })
+
+  it('dismissCheckpoint clears it with no LogEntry', () => {
+    const logLengthBefore = useSimStore.getState().log.length
+    useSimStore.getState().dismissCheckpoint()
+    const state = useSimStore.getState()
+    expect(state.pendingCheckpoint).toBeNull()
+    expect(state.log.length).toBe(logLengthBefore)
+  })
+
+  it('runGuidedTitrationLeap applies correctly-spaced dose + auto-chart entries and advances the clock', () => {
+    const clockBefore = useSimStore.getState().clockMinutes
+    useSimStore.getState().runGuidedTitrationLeap(NOREPI_ORDER_ID, 10.5) // 9 -> 9.5, 10, 10.5 (increment 0.5)
+    const state = useSimStore.getState()
+    expect(state.pendingCheckpoint).toBeNull()
+    expect(norepiInfusion().rate).toBe(10.5)
+    const leapDoseEntries = state.log.filter((e) => e.autoGeneratedByLeap && e.doseAction === 'titrate')
+    expect(leapDoseEntries.map((e) => e.dose)).toEqual([9.5, 10, 10.5])
+    const leapChartEntries = state.log.filter((e) => e.autoGeneratedByLeap && e.type === 'documentation')
+    expect(leapChartEntries.length).toBe(3)
+    expect(state.clockMinutes).toBe(clockBefore + 3 * 3) // 3 steps * order.interval.minMinutes (3)
+  })
+
+  it('runGuidedTitrationLeap stops early once target MAP is met mid-leap', () => {
+    useSimStore.setState({ vitals: { ...useSimStore.getState().vitals, map: 65 } }) // already at target (65)
+    useSimStore.getState().runGuidedTitrationLeap(NOREPI_ORDER_ID, 10.5)
+    const leapDoseEntries = useSimStore.getState().log.filter((e) => e.autoGeneratedByLeap && e.doseAction === 'titrate')
+    expect(leapDoseEntries.length).toBe(0)
+    expect(norepiInfusion().rate).toBe(9)
+  })
+
+  it('runGuidedTitrationLeap no-ops on a mismatched orderId', () => {
+    useSimStore.getState().runGuidedTitrationLeap(VASOPRESSIN_ORDER_ID, 10.5)
+    expect(useSimStore.getState().pendingCheckpoint).not.toBeNull()
+    expect(norepiInfusion().rate).toBe(9)
+  })
+
+  it('pendingCheckpoint locks the screen the same way pendingOverride does (participates in Simulation.tsx-style gating)', () => {
+    const state = useSimStore.getState()
+    expect(state.pendingCheckpoint).not.toBeNull()
+    // Simulation.tsx computes locked = pendingAction !== null || pendingOverride !== null || pendingCheckpoint !== null
+    expect(state.pendingOverride === null && state.pendingCheckpoint !== null).toBe(true)
   })
 })
 
@@ -547,7 +720,7 @@ describe('store — pause and restart', () => {
     expect(infusion.status).toBe('stopped')
     expect(infusion.rate).toBe(0)
     expect(infusion.rateBeforePause).toBe(0.5)
-    expect(infusion.stoppedAtMinute).toBe(0)
+    expect(infusion.stoppedAtMinute).toBe(3) // initiate auto-advanced the clock to 3 before this
     expect(useSimStore.getState().feedback).toMatchObject({ tone: 'info', title: 'Infusion paused' })
   })
 
@@ -626,7 +799,7 @@ describe('store — Block of Charting', () => {
     expect(useSimStore.getState().activeBlockOfCharting).toMatchObject({
       orderId: NOREPI_ORDER_ID,
       drugId: 'norepinephrine',
-      startMinute: 0,
+      startMinute: 3, // initiate auto-advanced the clock to 3 before this
     })
     // Off-order under normal rules: 0 min elapsed (needs 3) and a jump far past the 0.5 increment.
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 10)
@@ -650,7 +823,8 @@ describe('store — Block of Charting', () => {
     const state = useSimStore.getState()
     expect(state.activeBlockOfCharting).toBeNull()
     expect(state.blockOfChartingHistory).toHaveLength(1)
-    expect(state.blockOfChartingHistory[0]).toMatchObject({ orderId: NOREPI_ORDER_ID, startMinute: 0, endMinute: 20 })
+    // startMinute 3 (initiate's auto-advance) + 20 min declared-block duration = endMinute 23.
+    expect(state.blockOfChartingHistory[0]).toMatchObject({ orderId: NOREPI_ORDER_ID, startMinute: 3, endMinute: 23 })
   })
 
   it('advanceClock warns once an active block exceeds 4 hours', () => {
@@ -735,8 +909,8 @@ describe('store — vitalsHistory and retrospective charting', () => {
 
   it('chartRetrospective backdates an entry using the vitals snapshot from that minute', () => {
     useSimStore.getState().completeBeginBag(norepiInfusion().id)
-    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // t=0
-    useSimStore.getState().advanceClock(10) // t=10, new vitalsHistory entry
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5) // initiate, auto-advances to t=3
+    useSimStore.getState().advanceClock(7) // t=10, new vitalsHistory entry
     const vitalsAtTen = useSimStore.getState().vitals
     useSimStore.getState().advanceClock(5) // t=15 — current vitals now differ from t=10's
 

@@ -1,9 +1,11 @@
 import { useState } from 'react'
-import { Button, Toast } from '../../design/primitives'
+import { Button, InlineConfirm, Toast } from '../../design/primitives'
 import { priorAgentsActivationMet, useSimStore, type PendingOverride } from '../../state/store'
 import { getDrug } from '../../data/formulary'
+import { buildOutstandingChartingItems } from '../../engine/documentation'
 import {
   AlarisPump,
+  CernerChartingStatus,
   CernerIView,
   CernerMAR,
   InfusionsPanel,
@@ -14,43 +16,36 @@ import {
 } from '../../devices'
 import { VerificationPanel } from '../VerificationPanel'
 import { OverrideConfirmPanel } from '../OverrideConfirmPanel'
+import { TitrationCheckpointPanel } from '../TitrationCheckpointPanel'
+import { PacingOfferPanel } from '../PacingOfferPanel'
 import { SubmitConfirmPanel } from '../SubmitConfirmPanel'
 import { ProviderNotifyControl } from '../ProviderNotifyControl'
 import { BlockOfChartingControl } from '../BlockOfChartingControl'
 import { TitrationTimeline } from '../TitrationTimeline'
-import type { Infusion, LogEntry, Order } from '../../state/types'
+import type { LogEntry, Order } from '../../state/types'
 
 /**
- * BCMA/I-TRACE verification is only required for a new dose entering play (Begin Bag,
- * initiation) — not every subsequent titration/restart/discontinue on an infusion
- * that's already hanging and verified (see CLAUDE.md's narrowed verification scope).
+ * BCMA/I-TRACE verification is a single comprehensive check performed once, when the
+ * starting dose is programmed — covering both the bag and the dose together (Begin Bag
+ * itself is ungated; see CernerMAR.tsx / store.ts's completeBeginBag). Not required for
+ * subsequent titration/restart/discontinue on an infusion that's already hanging and
+ * verified (see CLAUDE.md's narrowed verification scope).
  */
-type PendingAction = { kind: 'beginBag'; infusionId: string } | { kind: 'initiate'; orderId: string; dose: number }
+type PendingAction = { kind: 'initiate'; orderId: string; dose: number }
 
 interface PendingInfo {
   title: string
   checklist: string[]
 }
 
-function buildPendingInfo(pending: PendingAction, infusions: Infusion[], orders: Order[]): PendingInfo {
-  if (pending.kind === 'beginBag') {
-    const infusion = infusions.find((i) => i.id === pending.infusionId)
-    const drug = infusion ? getDrug(infusion.drugId) : null
-    return {
-      title: `Begin Bag — ${drug?.name ?? ''}`,
-      checklist: [
-        'Bag label matches the order.',
-        'Bag matches what the pump is programmed to infuse.',
-        'Line traced to the patient (I-TRACE).',
-      ],
-    }
-  }
+function buildPendingInfo(pending: PendingAction, orders: Order[]): PendingInfo {
   const order = orders.find((o) => o.id === pending.orderId)
   const drug = order ? getDrug(order.drugId) : null
   return {
     title: `${drug?.name ?? ''} — ${pending.dose} ${drug?.unit ?? ''}`,
     checklist: [
-      'Medication matches the MAR/order (BCMA scan).',
+      'Bag label matches the order.',
+      'Bag matches what the pump is programmed to infuse.',
       'Dose/rate matches what you intend to program.',
       'Line traced to the patient (I-TRACE).',
     ],
@@ -99,6 +94,7 @@ export function Simulation() {
   const vitals = useSimStore((s) => s.vitals)
   const orders = useSimStore((s) => s.orders)
   const log = useSimStore((s) => s.log)
+  const verificationFlags = useSimStore((s) => s.verificationFlags)
   const vitalsHistory = useSimStore((s) => s.vitalsHistory)
   const feedback = useSimStore((s) => s.feedback)
   const dismissFeedback = useSimStore((s) => s.dismissFeedback)
@@ -117,10 +113,22 @@ export function Simulation() {
   const pendingOverride = useSimStore((s) => s.pendingOverride)
   const confirmDoseOverride = useSimStore((s) => s.confirmDoseOverride)
   const cancelDoseOverride = useSimStore((s) => s.cancelDoseOverride)
+  const pendingCheckpoint = useSimStore((s) => s.pendingCheckpoint)
+  const dismissCheckpoint = useSimStore((s) => s.dismissCheckpoint)
+  const pendingPacingOffer = useSimStore((s) => s.pendingPacingOffer)
+  const dismissPacingOffer = useSimStore((s) => s.dismissPacingOffer)
+  const runGuidedTitrationLeap = useSimStore((s) => s.runGuidedTitrationLeap)
 
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
   const [showSubmitConfirm, setShowSubmitConfirm] = useState(false)
-  const locked = pendingAction !== null || pendingOverride !== null
+  const [advanceConfirm, setAdvanceConfirm] = useState<{ tick: number; message: string } | null>(null)
+  const locked =
+    pendingAction !== null || pendingOverride !== null || pendingCheckpoint !== null || pendingPacingOffer !== null
+
+  function handleAdvanceClock(byMinutes: number) {
+    advanceClock(byMinutes)
+    setAdvanceConfirm((prev) => ({ tick: (prev?.tick ?? 0) + 1, message: `Advanced to ${clockMinutes + byMinutes} min` }))
+  }
 
   const channels: PumpChannelInfo[] = [...orders]
     .sort((a, b) => a.sequence - b.sequence)
@@ -137,21 +145,30 @@ export function Simulation() {
 
   const chartedEntries: ChartedVitalsEntry[] = log
     .filter((e) => e.type === 'documentation' && e.location === 'iView' && e.vitalsSnapshot)
-    .map((e) => ({ minute: e.minute, vitals: e.vitalsSnapshot!, retrospective: e.retrospective }))
+    .map((e) => ({
+      minute: e.minute,
+      vitals: e.vitalsSnapshot!,
+      retrospective: e.retrospective,
+      guided: e.autoGeneratedByLeap,
+    }))
 
   function handleConfirm() {
     if (!pendingAction) return
-    if (pendingAction.kind === 'beginBag') completeBeginBag(pendingAction.infusionId)
-    else submitDose(pendingAction.orderId, pendingAction.dose)
+    submitDose(pendingAction.orderId, pendingAction.dose)
     setPendingAction(null)
   }
 
+  const outstandingItems = buildOutstandingChartingItems(orders, infusions, log, verificationFlags)
+
   function handleEndClick() {
-    if (mode === 'validation') setShowSubmitConfirm(true)
+    // Soft warning only — never a hard block (documentation cadence is flagged, not
+    // blocked, everywhere else in this sim). Fires in validation mode (a graded
+    // submission) or whenever something's still outstanding, in either mode.
+    if (mode === 'validation' || outstandingItems.length > 0) setShowSubmitConfirm(true)
     else setPhase('debrief')
   }
 
-  const pendingInfo = pendingAction ? buildPendingInfo(pendingAction, infusions, orders) : null
+  const pendingInfo = pendingAction ? buildPendingInfo(pendingAction, orders) : null
 
   return (
     <div className="flex flex-col gap-gutter">
@@ -187,8 +204,47 @@ export function Simulation() {
         />
       )}
 
+      {pendingCheckpoint &&
+        (() => {
+          const order = orders.find((o) => o.id === pendingCheckpoint.orderId)
+          if (!order) return null
+          return (
+            <TitrationCheckpointPanel
+              order={order}
+              drug={getDrug(order.drugId)}
+              doseAtTrigger={pendingCheckpoint.doseAtTrigger}
+              mapAtTrigger={pendingCheckpoint.mapAtTrigger}
+              onNotifyProvider={() => {
+                notifyProvider(order.id)
+                dismissCheckpoint()
+              }}
+              onRunGuidedLeap={(targetDose) => runGuidedTitrationLeap(order.id, targetDose)}
+              onCancel={dismissCheckpoint}
+            />
+          )
+        })()}
+
+      {pendingPacingOffer &&
+        (() => {
+          const order = orders.find((o) => o.id === pendingPacingOffer.orderId)
+          if (!order) return null
+          return (
+            <PacingOfferPanel
+              order={order}
+              drug={getDrug(order.drugId)}
+              currentDose={pendingPacingOffer.currentDose}
+              nextDecisionDose={pendingPacingOffer.nextDecisionDose}
+              nextDecisionLabel={pendingPacingOffer.nextDecisionLabel}
+              onRunGuidedLeap={(targetDose) => runGuidedTitrationLeap(order.id, targetDose)}
+              onCancel={dismissPacingOffer}
+            />
+          )
+        })()}
+
       {showSubmitConfirm && (
         <SubmitConfirmPanel
+          isGraded={mode === 'validation'}
+          outstandingItems={outstandingItems}
           onConfirm={() => {
             setShowSubmitConfirm(false)
             setPhase('debrief')
@@ -202,13 +258,18 @@ export function Simulation() {
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface p-3 shadow-sm">
         <span className="text-sm font-semibold text-ink">Advance time</span>
         <span className="font-mono text-sm text-muted">clock {clockMinutes} min</span>
+        <InlineConfirm trigger={advanceConfirm?.tick ?? null} message={advanceConfirm?.message ?? ''} />
         <div className="ml-auto flex gap-2">
           {CLOCK_ADVANCE_OPTIONS.map((m) => (
-            <Button key={m} size="sm" variant="secondary" disabled={locked} onClick={() => advanceClock(m)}>
+            <Button key={m} size="sm" variant="secondary" disabled={locked} onClick={() => handleAdvanceClock(m)}>
               +{m} min
             </Button>
           ))}
         </div>
+        <p className="basis-full text-xs text-muted">
+          Time advances automatically after you start or titrate a dose, by the order's own interval. Use these
+          buttons only to wait longer or catch up on documentation.
+        </p>
       </div>
 
       <div className="grid gap-gutter md:grid-cols-2">
@@ -248,7 +309,7 @@ export function Simulation() {
           <CernerMAR
             infusions={infusions}
             disabled={locked}
-            onRequestBeginBag={(infusionId) => setPendingAction({ kind: 'beginBag', infusionId })}
+            onCompleteBeginBag={completeBeginBag}
           />
           <CernerIView
             priorVitals={scenario.priorVitals}
@@ -263,6 +324,7 @@ export function Simulation() {
             disabled={locked}
             onChartRetrospective={chartRetrospective}
           />
+          <CernerChartingStatus orders={orders} infusions={infusions} log={log} verificationFlags={verificationFlags} />
         </div>
       </div>
 

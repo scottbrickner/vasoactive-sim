@@ -18,3 +18,6 @@ export type { InfusionsPanelProps } from './InfusionsPanel/InfusionsPanel'
 
 export { DocumentationReview } from './DocumentationReview/DocumentationReview'
 export type { DocumentationReviewProps } from './DocumentationReview/DocumentationReview'
+
+export { CernerChartingStatus } from './CernerChartingStatus/CernerChartingStatus'
+export type { CernerChartingStatusProps } from './CernerChartingStatus/CernerChartingStatus'

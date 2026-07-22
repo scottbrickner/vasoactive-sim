@@ -61,6 +61,47 @@ export function meetsTarget(currentValue: number, target: TitrationTarget): bool
   }
 }
 
+const MAX_LEAP_STEPS = 500
+
+function decimalPlacesOf(value: number): number {
+  const str = value.toString()
+  const dot = str.indexOf('.')
+  return dot === -1 ? 0 : str.length - dot - 1
+}
+
+export interface GuidedLeapPlan {
+  /** The sequence of intermediate doses a guided titration leap would apply, in order. */
+  doses: number[]
+  /** True when `requestedTarget` didn't land on a clean increment step (or exceeded the allowed max) and had to be snapped down to the nearest reachable dose. */
+  wasSnappedDown: boolean
+}
+
+/**
+ * Plans a guided multi-step titration leap from `currentDose` toward `requestedTarget`,
+ * stepping by `increment` and never exceeding `maxAllowedDose`. Pure — used by
+ * runGuidedTitrationLeap (state/store.ts) to both preview and apply the leap, so the
+ * preview and what actually gets applied can never drift apart.
+ */
+export function computeGuidedLeapDoses(
+  currentDose: number,
+  increment: number,
+  maxAllowedDose: number,
+  requestedTarget: number,
+): GuidedLeapPlan {
+  if (!Number.isFinite(requestedTarget) || requestedTarget <= currentDose || increment <= 0) {
+    return { doses: [], wasSnappedDown: false }
+  }
+  const clampedTarget = Math.min(requestedTarget, maxAllowedDose)
+  const rawSteps = (clampedTarget - currentDose) / increment
+  const steps = Math.min(Math.floor(rawSteps + EPSILON), MAX_LEAP_STEPS)
+  if (steps <= 0) return { doses: [], wasSnappedDown: false }
+  const decimalPlaces = Math.max(decimalPlacesOf(currentDose), decimalPlacesOf(increment))
+  const doses = Array.from({ length: steps }, (_, i) => Number((currentDose + increment * (i + 1)).toFixed(decimalPlaces)))
+  const finalDose = doses[doses.length - 1]
+  const wasSnappedDown = clampedTarget - finalDose > EPSILON || clampedTarget < requestedTarget
+  return { doses, wasSnappedDown }
+}
+
 export function evaluateTitration(request: TitrationRequest): TitrationResult {
   const {
     action,

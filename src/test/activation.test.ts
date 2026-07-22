@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deriveActivationText } from '../engine/activation'
+import { deriveActivationText, deriveNextDecisionPoint } from '../engine/activation'
 import type { Order } from '../state/types'
 
 const norepiOrder: Order = {
@@ -44,5 +44,40 @@ describe('deriveActivationText', () => {
     const text = deriveActivationText(order, [norepiOrder, order])
     expect(text).toMatch(/10 mcg\/min/)
     expect(text).toMatch(/33%/)
+  })
+})
+
+// runGuidedTitrationLeap's pacing offer (state/store.ts's PendingPacingOffer) uses this to
+// suggest a sensible fast-forward target — the nearest upcoming milestone, not just "max".
+describe('deriveNextDecisionPoint', () => {
+  it('picks the order\'s own early-notification threshold when it is the nearest milestone', () => {
+    const order: Order = { ...norepiOrder, earlyNotificationThreshold: 0.3 }
+    const point = deriveNextDecisionPoint(order, [order], 5)
+    expect(point).toMatchObject({ dose: 9 }) // 30 * 0.3
+    expect(point?.label).toMatch(/early-notification checkpoint/)
+  })
+
+  it('picks a dependent order\'s activation threshold when it is nearer than the early-notification threshold', () => {
+    const order: Order = { ...norepiOrder, earlyNotificationThreshold: 0.9 } // 27
+    const dependent = vasoOrder({ activationThreshold: 1 / 3 }) // norepi 10
+    const point = deriveNextDecisionPoint(order, [order, dependent], 5)
+    expect(point).toMatchObject({ dose: 10 })
+    expect(point?.label).toMatch(/activating Vasopressin/)
+  })
+
+  it('falls back to the order\'s own maxDose when nothing else applies', () => {
+    const point = deriveNextDecisionPoint(norepiOrder, [norepiOrder], 5)
+    expect(point).toMatchObject({ dose: 30 })
+    expect(point?.label).toMatch(/ordered maximum/)
+  })
+
+  it('returns null once currentDose is already at or past every milestone', () => {
+    expect(deriveNextDecisionPoint(norepiOrder, [norepiOrder], 30)).toBeNull()
+  })
+
+  it('skips a milestone currentDose has already passed, picking the next one', () => {
+    const order: Order = { ...norepiOrder, earlyNotificationThreshold: 0.3 } // 9
+    const point = deriveNextDecisionPoint(order, [order], 9) // already at/past 9
+    expect(point).toMatchObject({ dose: 30 })
   })
 })

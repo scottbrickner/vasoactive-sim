@@ -27,14 +27,14 @@ describe('scoreSession — a clean, fully-compliant run', () => {
   beforeEach(() => {
     const s = useSimStore.getState()
     s.completeBeginBag(norepiInfusionId())
-    s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0
-    s.chartVitals() // t=0: satisfies 'initiation'
-    s.advanceClock(30) // t=30
+    s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0, auto-advances to t=3
+    s.chartRetrospective(0) // backdate to the true initiation minute — satisfies 'initiation'
+    s.advanceClock(27) // t=30
     s.chartVitals() // satisfies 'plus30Start'
     s.advanceClock(3) // t=33
     s.chartVitals() // satisfies 'preTitration' for the titration below
-    s.submitDose(NOREPI_ORDER_ID, 1) // titrate at t=33 (delta 0.5, interval 33 >= 3)
-    s.advanceClock(30) // t=63
+    s.submitDose(NOREPI_ORDER_ID, 1) // titrate at t=33 (delta 0.5, interval easily satisfied), auto-advances to t=36
+    s.advanceClock(27) // t=63
     s.chartVitals() // satisfies 'plus30PostTitration' (63 >= 33+30)
   })
 
@@ -55,9 +55,9 @@ describe('scoreSession — off-order titration', () => {
   it('flags adherence and interval/increment as partial when a titration is rejected', () => {
     const s = useSimStore.getState()
     s.completeBeginBag(norepiInfusionId())
-    s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate ok
-    s.submitDose(NOREPI_ORDER_ID, 1) // titrate at t=0, 0 min elapsed — too soon (needs 3), deferred
-    s.cancelDoseOverride() // training mode — logs it as off-order, matching the old immediate-reject behavior
+    s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate ok, auto-advances so interval is already satisfied
+    s.submitDose(NOREPI_ORDER_ID, 2) // titrate — wrong increment (delta 1.5, ordered 0.5), deferred
+    s.cancelDoseOverride() // training mode — logs it as off-order
     expect(categoryStatus('adherence')).toBe('partial')
     // Only one titration was attempted and it violated the interval, so 0-of-1 is
     // correctly "missed" here, not "partial" — partial would need a mix of both.
@@ -71,8 +71,8 @@ describe('scoreSession — overridden dose entries', () => {
   it('counts an overridden dose in the adherence denominator but not the numerator', () => {
     const s = useSimStore.getState()
     s.completeBeginBag(norepiInfusionId())
-    s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate ok
-    s.submitDose(NOREPI_ORDER_ID, 1) // titrate at t=0 — too soon, deferred
+    s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate ok, auto-advances so interval is already satisfied
+    s.submitDose(NOREPI_ORDER_ID, 2) // titrate — wrong increment, deferred
     s.confirmDoseOverride() // training-mode override — applies despite being off-order
     // 1 clean (initiate) + 1 overridden (titrate) = 2 total, only 1 counted as adherent.
     expect(categoryStatus('adherence')).toBe('partial')
@@ -122,6 +122,10 @@ describe('scoreSession — early-notification threshold', () => {
     useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.02) // initiate vasopressin
     useSimStore.setState((st) => ({
       orders: st.orders.map((o) => (o.id === VASOPRESSIN_ORDER_ID ? { ...o, earlyNotificationThreshold: 0.75 } : o)),
+      // Re-anchor vasopressin's own lastActionMinute to 0 — its initiate now auto-advances
+      // the shared clock too, so without this the explicit clockMinutes:30 below would
+      // read as only 27 min elapsed since vaso's own last action (its interval is 30 min).
+      infusions: st.infusions.map((i) => (i.drugId === 'vasopressin' ? { ...i, lastActionMinute: 0 } : i)),
       clockMinutes: 30,
     }))
     useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.03) // titrate; crosses 0.04*0.75=0.03
@@ -190,6 +194,40 @@ describe('scoreSession — Block of Charting', () => {
     // Only the initiate (0.5, applied) counts toward adherence — the block titration is excluded.
     expect(categoryStatus('adherence')).toBe('met')
     expect(categoryStatus('intervalIncrement')).toBe('n/a')
+  })
+})
+
+describe('scoreSession — guided titration leap', () => {
+  beforeEach(() => {
+    const s = useSimStore.getState()
+    s.completeBeginBag(norepiInfusionId())
+    s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate at t=0
+    useSimStore.setState((st) => ({
+      orders: st.orders.map((o) => (o.id === NOREPI_ORDER_ID ? { ...o, earlyNotificationThreshold: 0.3 } : o)),
+      infusions: st.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 8.5, lastActionMinute: 0 } : i)),
+      clockMinutes: 3,
+    }))
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9) // crosses threshold, opens the checkpoint
+    useSimStore.getState().runGuidedTitrationLeap(NOREPI_ORDER_ID, 10.5) // 9.5, 10, 10.5
+  })
+
+  it('excludes leap-generated dose entries from order adherence / interval-increment scoring', () => {
+    // Only the initiate (0.5) and the manually-entered 9 count toward adherence/interval-
+    // increment — the three leap-generated titrations are correct-by-construction, not a
+    // demonstrated learner skill, so they're excluded from both categories' denominators.
+    const normalDoseEntryCount = useSimStore
+      .getState()
+      .log.filter((e) => e.type === 'action' && e.doseAction != null && !e.autoGeneratedByLeap).length
+    expect(normalDoseEntryCount).toBe(2)
+    expect(categoryStatus('adherence')).toBe('met')
+  })
+
+  it('still satisfies documentation-cadence checkpoints via the leap auto-chart entries', () => {
+    // Each leap step auto-charts vitals at its own minute, so preTitration for that step is
+    // satisfied without any manual "Chart now" click.
+    const card = score()
+    const documentation = card.categories.find((c) => c.key === 'documentation')!
+    expect(documentation.status).not.toBe('missed')
   })
 })
 

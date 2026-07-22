@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { deriveActivationText } from '../engine/activation'
-import { evaluateTitration, meetsTarget } from '../engine/titrationEngine'
+import { computeGuidedLeapDoses, evaluateTitration, meetsTarget } from '../engine/titrationEngine'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
 import type { Order } from '../state/types'
 
@@ -243,5 +243,44 @@ describe('titrationEngine — meetsTarget', () => {
   it('is true at or above the target value', () => {
     expect(meetsTarget(atTargetMap, norepiOrder.target)).toBe(true)
     expect(meetsTarget(atTargetMap + 5, norepiOrder.target)).toBe(true)
+  })
+})
+
+// runGuidedTitrationLeap (state/store.ts) uses this exact plan for both the preview shown
+// in TitrationCheckpointPanel and what actually gets applied, so the two can't drift apart.
+describe('titrationEngine — computeGuidedLeapDoses', () => {
+  it('produces a clean-increment step sequence toward the target', () => {
+    const plan = computeGuidedLeapDoses(9, 0.5, 30, 10.5)
+    expect(plan.doses).toEqual([9.5, 10, 10.5])
+    expect(plan.wasSnappedDown).toBe(false)
+  })
+
+  it('snaps a non-aligned target down to the nearest reachable dose', () => {
+    const plan = computeGuidedLeapDoses(8.5, 0.5, 30, 10.7)
+    expect(plan.doses).toEqual([9, 9.5, 10, 10.5])
+    expect(plan.wasSnappedDown).toBe(true)
+  })
+
+  it('returns an empty plan when the target is at or below the current dose', () => {
+    expect(computeGuidedLeapDoses(9, 0.5, 30, 9).doses).toEqual([])
+    expect(computeGuidedLeapDoses(9, 0.5, 30, 5).doses).toEqual([])
+  })
+
+  it('clamps to maxAllowedDose when the target exceeds it', () => {
+    const plan = computeGuidedLeapDoses(29, 0.5, 30, 35)
+    expect(plan.doses).toEqual([29.5, 30])
+    expect(plan.wasSnappedDown).toBe(true)
+  })
+
+  it('returns an empty plan for non-finite or invalid input rather than crashing', () => {
+    expect(computeGuidedLeapDoses(9, 0.5, 30, NaN).doses).toEqual([])
+    expect(computeGuidedLeapDoses(9, 0.5, 30, -Infinity).doses).toEqual([])
+    expect(computeGuidedLeapDoses(9, 0, 30, 15).doses).toEqual([])
+  })
+
+  it('handles the vasopressin float-precision case (0.02 -> 0.04 by 0.01)', () => {
+    const plan = computeGuidedLeapDoses(0.02, 0.01, 0.04, 0.04)
+    expect(plan.doses).toEqual([0.03, 0.04])
+    expect(plan.wasSnappedDown).toBe(false)
   })
 })

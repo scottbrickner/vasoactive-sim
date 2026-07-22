@@ -8,12 +8,15 @@
  * These functions exist so that mapping is asserted and unit-tested rather than
  * implied, and so the store has a single source of truth to construct entries from.
  *
- * Cadence: checkCadence is retrospective (used by scoring.ts at debrief time) — the
- * live UI deliberately never labels a chart entry with which checkpoint it satisfies
- * (see devices/CernerIView's doc comment); only the debrief reveals compliance.
+ * Cadence: checkCadence and buildCadenceStatusForOrders are consumed both by scoring.ts
+ * (debrief scorecard) and the live devices/CernerChartingStatus view (Phase 12d) — the
+ * per-entry iView flowsheet itself still never labels an entry with which checkpoint it
+ * satisfies (see devices/CernerIView's doc comment); Charting Status is a separate,
+ * explicit self-check surface, not a change to how individual entries are labeled.
  */
 import { DOCUMENTATION_PLACEMENT } from '../data/policy'
-import type { DocumentationCadencePoint, DocumentationLocation } from '../state/types'
+import { getDrug } from '../data/formulary'
+import type { DocumentationCadencePoint, DocumentationLocation, Infusion, LogEntry, Order } from '../state/types'
 
 export type DocumentationKind = keyof typeof DOCUMENTATION_PLACEMENT
 
@@ -83,4 +86,95 @@ export function checkCadence(
   }
 
   return checks
+}
+
+export interface OrderCadenceStatus {
+  orderId: string
+  drugId: Order['drugId']
+  checks: CadenceCheck[]
+}
+
+/**
+ * Per-order cadence status for every order with a started (or pre-seeded-infusing) order
+ * — the single source `checkCadence` results both debrief scoring (scoring.ts category 5)
+ * and the live Charting Status view (devices/CernerChartingStatus) build on, so what's
+ * shown mid-session can never drift from what debrief actually scores. `doseEntries` is
+ * `log` filtered to `type === 'action' && doseAction != null`; `chartedMinutes` is `log`
+ * filtered to `type === 'documentation' && location === 'iView'`, mapped to `minute`.
+ */
+export function buildCadenceStatusForOrders(
+  orders: Order[],
+  infusions: Infusion[],
+  doseEntries: LogEntry[],
+  chartedMinutes: number[],
+): OrderCadenceStatus[] {
+  return orders.flatMap((order) => {
+    const initiation = doseEntries.find(
+      (e) => e.orderId === order.id && e.doseAction === 'initiate' && e.outcome === 'applied',
+    )
+    // A scenario can pre-seed an order's infusion already infusing (e.g. a weaning
+    // scenario's ScenarioConfig.initialInfusions) — it never passes through submitDose's
+    // initiate path, so there's no real initiation LogEntry to anchor cadence checks to.
+    // Anchor to minute 0 instead of silently treating the whole order as "nothing started
+    // yet" (which would read as n/a regardless of the learner's own charting).
+    const preSeededInfusion = infusions.find((i) => i.orderId === order.id && i.status !== 'hanging')
+    const initiationMinute = initiation?.minute ?? (preSeededInfusion ? 0 : null)
+    if (initiationMinute == null) return []
+    const titrationMinutes = doseEntries
+      .filter((e) => e.orderId === order.id && e.doseAction === 'titrate' && e.outcome === 'applied')
+      .map((e) => e.minute)
+      .sort((a, b) => a - b)
+    return [
+      {
+        orderId: order.id,
+        drugId: order.drugId,
+        checks: checkCadence(initiationMinute, titrationMinutes, chartedMinutes),
+      },
+    ]
+  })
+}
+
+function cadenceLabel(check: CadenceCheck): string {
+  switch (check.point) {
+    case 'initiation':
+      return 'initiation charting'
+    case 'plus30Start':
+      return '+30 min after start'
+    case 'preTitration':
+      return `pre-titration #${check.titrationIndex}`
+    case 'plus30PostTitration':
+      return `+30 min after titration #${check.titrationIndex}`
+  }
+}
+
+/**
+ * Short, human-readable list of what's still outstanding before ending a session — every
+ * unmet cadence checkpoint, plus (defensively) any started order whose initiate entry
+ * somehow lacks verification. Under the current design verification is set the same tick
+ * an initiate entry is created, so that second case rarely if ever fires in practice — kept
+ * for correctness rather than as the primary signal. Used both by the live Charting Status
+ * view and the soft pre-end warning (Simulation.tsx) — empty means nothing outstanding.
+ */
+export function buildOutstandingChartingItems(
+  orders: Order[],
+  infusions: Infusion[],
+  log: LogEntry[],
+  verificationFlags: Record<string, boolean>,
+): string[] {
+  const doseEntries = log.filter((e) => e.type === 'action' && e.doseAction != null)
+  const chartedMinutes = log.filter((e) => e.type === 'documentation' && e.location === 'iView').map((e) => e.minute)
+  const statuses = buildCadenceStatusForOrders(orders, infusions, doseEntries, chartedMinutes)
+
+  const items: string[] = []
+  for (const status of statuses) {
+    const drug = getDrug(status.drugId)
+    for (const check of status.checks) {
+      if (!check.met) items.push(`${drug.name}: ${cadenceLabel(check)} not yet charted.`)
+    }
+    const initiateEntry = doseEntries.find((e) => e.orderId === status.orderId && e.doseAction === 'initiate')
+    if (initiateEntry && !verificationFlags[initiateEntry.id]) {
+      items.push(`${drug.name}: starting dose not yet verified (BCMA/I-TRACE).`)
+    }
+  }
+  return items
 }

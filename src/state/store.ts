@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { deriveActivationText } from '../engine/activation'
+import { deriveActivationText, deriveNextDecisionPoint } from '../engine/activation'
 import { advance, minutesElapsed } from '../engine/clock'
 import { correctLocationFor } from '../engine/documentation'
 import { evaluateDose, limitsFromOrder } from '../engine/guardrails'
@@ -13,7 +13,13 @@ import {
   responseFraction,
   stepTowardTarget,
 } from '../engine/physiology'
-import { evaluateTitration, meetsTarget, type TitrationAction, type TitrationResult } from '../engine/titrationEngine'
+import {
+  computeGuidedLeapDoses,
+  evaluateTitration,
+  meetsTarget,
+  type TitrationAction,
+  type TitrationResult,
+} from '../engine/titrationEngine'
 import { getDrug } from '../data/formulary'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
 import type {
@@ -139,12 +145,40 @@ function crossedEarlyNotificationThreshold(order: Order, priorDose: number, prop
   return priorDose < thresholdDose && proposedDose >= thresholdDose && !meetsTarget(currentMap, order.target)
 }
 
-function buildEarlyNotificationFeedback(drug: DrugDefinition, dose: number, order: Order): FeedbackMessage {
-  return {
-    tone: 'warning',
-    title: 'Consider notifying the provider',
-    message: `${drug.name} is now at ${dose} ${drug.unit} — ${order.target.metric} still below target as this order's early-notification checkpoint is reached.`,
+/**
+ * After a manual (non-leap) titrate applies, bumps that order's pacing counter and —
+ * once it reaches PACING_OFFER_THRESHOLD — opens a non-clinical pendingPacingOffer
+ * pointed at the nearest upcoming milestone (see deriveNextDecisionPoint). Skipped
+ * entirely the tick a clinical checkpoint fires (crossedEarlyThreshold) — the real
+ * decision takes precedence over a workflow-pacing nudge, and resolves the same
+ * "climbing for a while" pressure the pacing offer exists to address.
+ */
+function applyPacingTrigger(
+  get: () => Pick<SimStore, 'orders' | 'infusions' | 'pacingTitrationsSinceOffer' | 'pendingCheckpoint' | 'pendingPacingOffer'>,
+  set: (partial: Partial<SimStore>) => void,
+  orderId: string,
+  crossedEarlyThreshold: boolean,
+) {
+  const s = get()
+  if (crossedEarlyThreshold) {
+    set({ pacingTitrationsSinceOffer: { ...s.pacingTitrationsSinceOffer, [orderId]: 0 } })
+    return
   }
+  const count = (s.pacingTitrationsSinceOffer[orderId] ?? 0) + 1
+  if (count < PACING_OFFER_THRESHOLD || s.pendingCheckpoint || s.pendingPacingOffer) {
+    set({ pacingTitrationsSinceOffer: { ...s.pacingTitrationsSinceOffer, [orderId]: count } })
+    return
+  }
+  const order = s.orders.find((o) => o.id === orderId)
+  const infusion = s.infusions.find((i) => i.orderId === orderId)
+  const nextPoint = order && infusion ? deriveNextDecisionPoint(order, s.orders, infusion.rate) : null
+  set({
+    pacingTitrationsSinceOffer: { ...s.pacingTitrationsSinceOffer, [orderId]: 0 },
+    pendingPacingOffer:
+      nextPoint && infusion
+        ? { orderId, currentDose: infusion.rate, nextDecisionDose: nextPoint.dose, nextDecisionLabel: nextPoint.label }
+        : s.pendingPacingOffer,
+  })
 }
 
 function nextChannelLetter(infusions: Infusion[]): string {
@@ -167,6 +201,37 @@ export interface PendingOverride {
   reasons: string[]
   violations: TitrationViolations
   guardrailStatus: GuardrailStatus
+}
+
+/**
+ * An early-notification-threshold crossing (see crossedEarlyNotificationThreshold)
+ * awaiting the learner's decision: notify the provider, or keep titrating the same
+ * agent — optionally via a guided multi-step leap (see runGuidedTitrationLeap). Not
+ * part of SimState — transient UI-adjacent store state, like PendingOverride.
+ */
+export interface PendingCheckpoint {
+  orderId: string
+  doseAtTrigger: number
+  mapAtTrigger: number
+  triggeredAtMinute: number
+}
+
+/** How many manual (non-leap) titrations on the same order trigger a pacing offer. */
+const PACING_OFFER_THRESHOLD = 3
+
+/**
+ * A non-clinical "want to speed through this climb?" offer — distinct from
+ * PendingCheckpoint, which is a real clinical decision (notify provider vs. continue) at
+ * an exact threshold. This fires periodically (every PACING_OFFER_THRESHOLD manual
+ * titrations) purely to cut down on repetitive clicking toward whatever the next
+ * decision point actually is (see engine/activation.ts's deriveNextDecisionPoint). Not
+ * part of SimState — transient UI-adjacent store state, like PendingOverride.
+ */
+export interface PendingPacingOffer {
+  orderId: string
+  currentDose: number
+  nextDecisionDose: number
+  nextDecisionLabel: string
 }
 
 interface ApplyStateSlice {
@@ -278,6 +343,12 @@ interface SimStore {
   blockOfChartingHistory: BlockOfChartingRecord[]
   /** A deferred off-order dose attempt awaiting the training-mode learner's decision. */
   pendingOverride: PendingOverride | null
+  /** An early-notification-threshold crossing awaiting the learner's notify-vs-continue decision. */
+  pendingCheckpoint: PendingCheckpoint | null
+  /** Manual (non-leap) titration count since the last pacing offer, keyed by orderId — resets on offer/clinical-checkpoint. */
+  pacingTitrationsSinceOffer: Record<string, number>
+  /** A non-clinical "speed through this climb?" offer awaiting the learner's decision. */
+  pendingPacingOffer: PendingPacingOffer | null
   /** Snapshot of live vitals at each sim minute reached — see chartRetrospective. */
   vitalsHistory: { minute: number; vitals: ScenarioConfig['startingVitals'] }[]
   feedback: FeedbackMessage | null
@@ -327,6 +398,12 @@ interface SimStore {
   confirmDoseOverride: () => void
   /** Rejects a pending training-mode override: logs it as 'off-order', infusion untouched. */
   cancelDoseOverride: () => void
+  /** Declines to act on a pending early-notification checkpoint for now — no LogEntry (nothing happened). */
+  dismissCheckpoint: () => void
+  /** Declines a pending pacing offer for now — no LogEntry, resumes manual titration. */
+  dismissPacingOffer: () => void
+  /** Runs a guided multi-step titration leap toward targetDose for the checkpoint's (or pacing offer's) order, one correctly-spaced dose + auto-chart entry per step. */
+  runGuidedTitrationLeap: (orderId: string, targetDose: number) => void
   notifyProvider: (orderId: string, reason?: string) => void
   chartVitals: () => void
   /** Backdates a chart entry to a past minute, auto-filling the vitals actually recorded then (vitalsHistory) — never freely entered or graded on recall. */
@@ -366,6 +443,9 @@ function initialSimFields(
     activeBlockOfCharting: null as BlockOfChartingRecord | null,
     blockOfChartingHistory: [] as BlockOfChartingRecord[],
     pendingOverride: null as PendingOverride | null,
+    pendingCheckpoint: null as PendingCheckpoint | null,
+    pacingTitrationsSinceOffer: {} as Record<string, number>,
+    pendingPacingOffer: null as PendingPacingOffer | null,
     vitalsHistory: [{ minute: 0, vitals: { ...scenario.startingVitals } }],
     feedback: null as FeedbackMessage | null,
   }
@@ -474,6 +554,10 @@ export const useSimStore = create<SimStore>((set, get) => ({
     }))
   },
 
+  // Ungated, like pause/restart/discontinue — BCMA/I-TRACE verification is no longer a
+  // separate Begin-Bag-time event (see submitDose's initiate path): the one comprehensive
+  // check happens when the starting dose is programmed, covering the bag AND the dose
+  // together, matching how a nurse actually verifies once at the bedside rather than twice.
   completeBeginBag: (infusionId) => {
     const state = get()
     const infusion = state.infusions.find((i) => i.id === infusionId)
@@ -484,7 +568,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       id: nextId('log'),
       minute: state.clockMinutes,
       type: 'action',
-      summary: `Begin Bag verified for ${drug.name} — label matches order, bag matches pump program, line traced to patient (I-TRACE).`,
+      summary: `Begin Bag: ${drug.name} bag hung, ready to program.`,
       orderId: infusion.orderId,
       drugId: infusion.drugId,
       outcome: 'applied',
@@ -502,12 +586,11 @@ export const useSimStore = create<SimStore>((set, get) => ({
     set((s) => ({
       infusions: s.infusions.map((i) => (i.id === infusionId ? { ...i, beginBagCompleted: true } : i)),
       log: [...s.log, actionEntry, marEntry],
-      verificationFlags: { ...s.verificationFlags, [actionEntry.id]: true },
       adherenceFlags: { ...s.adherenceFlags, [actionEntry.id]: true },
       feedback: {
         tone: 'success',
         title: 'Begin Bag complete',
-        message: `${drug.name} is verified and ready to program.`,
+        message: `${drug.name} is hung and ready — BCMA/I-TRACE verification happens when you program the starting dose.`,
       },
     }))
   },
@@ -657,16 +740,18 @@ export const useSimStore = create<SimStore>((set, get) => ({
     // silent override (see `overridden` above).
     set((s) => computeApplyUpdate(s, order, drug, infusion, action, dose))
 
-    // Feedback precedence: the early-notification checkpoint (if newly crossed) wins
-    // over the routine post-titrate prompt, which itself replaces the old generic
-    // "Titration applied" — naming the interval and prompting reassessment rather than
-    // just confirming the dose landed. Initiate keeps its own distinct message (it's
-    // not itself an interval to reassess after). advanceClock's own more-urgent
-    // overrides (2hr-stopped, 4hr-block, deterioration-started) still get final say,
-    // unchanged, since it runs after this and only overwrites `feedback` when one of
-    // those newly applies.
+    // Precedence: the early-notification checkpoint (if newly crossed) wins over the
+    // routine post-titrate prompt — it opens an interactive decision panel instead of
+    // just a toast (see TitrationCheckpointPanel), replacing the old
+    // buildEarlyNotificationFeedback toast entirely. The routine post-titrate prompt
+    // itself replaces the old generic "Titration applied" — naming the interval and
+    // prompting reassessment rather than just confirming the dose landed. Initiate
+    // keeps its own distinct message (it's not itself an interval to reassess after).
+    // advanceClock's own more-urgent overrides (2hr-stopped, 4hr-block, deterioration-
+    // started) still get final say, unchanged, since it runs after this and only
+    // overwrites `feedback` when one of those newly applies.
     if (crossedEarlyThreshold) {
-      set({ feedback: buildEarlyNotificationFeedback(drug, dose, order) })
+      set({ pendingCheckpoint: { orderId: order.id, doseAtTrigger: dose, mapAtTrigger: state.vitals.map, triggeredAtMinute: state.clockMinutes } })
     } else if (action === 'titrate') {
       set({
         feedback: {
@@ -677,14 +762,25 @@ export const useSimStore = create<SimStore>((set, get) => ({
       })
     } else {
       set({
-        feedback: { tone: 'success', title: 'Infusion started', message: `${drug.name} now at ${dose} ${drug.unit}.` },
+        feedback: {
+          tone: 'success',
+          title: 'Infusion started',
+          message: `${drug.name} now at ${dose} ${drug.unit}. Time will auto-advance ${order.interval.minMinutes} min — chart vitals and reassess before titrating.`,
+        },
       })
     }
 
-    // Titrating implies time has passed for reassessment; initiating is the start of
-    // observation, not itself an interval. A facilitator-driven-vs-auto pacing toggle
-    // is planned for Phase 10 — auto is the only mode until then.
-    if (action === 'titrate') get().advanceClock(order.interval.minMinutes)
+    // Every manual titrate on this order (clean or off-order-but-applied) counts toward
+    // the pacing offer — skipped under Block of Charting, where free titration is already
+    // sanctioned and a pacing nudge would just be noise. A one-time starting dose isn't
+    // part of the "repeated manual titrations" pattern the pacing offer tracks.
+    if (action === 'titrate' && !blockActive) applyPacingTrigger(get, set, order.id, crossedEarlyThreshold)
+
+    // Both initiating and titrating advance the clock by the order's own interval — the
+    // pump doesn't know or care which kind of dose-change just happened. A facilitator-
+    // driven-vs-auto pacing toggle is planned for Phase 10 — auto is the only mode until
+    // then.
+    get().advanceClock(order.interval.minMinutes)
   },
 
   confirmDoseOverride: () => {
@@ -731,7 +827,14 @@ export const useSimStore = create<SimStore>((set, get) => ({
     // Same precedence as submitDose's applied path: the early-notification checkpoint,
     // if newly crossed, wins over the routine "applied via override" confirmation.
     if (crossedEarlyThreshold) {
-      set({ feedback: buildEarlyNotificationFeedback(drug, pending.dose, order) })
+      set({
+        pendingCheckpoint: {
+          orderId: order.id,
+          doseAtTrigger: pending.dose,
+          mapAtTrigger: state.vitals.map,
+          triggeredAtMinute: state.clockMinutes,
+        },
+      })
     } else {
       set({
         feedback: {
@@ -742,7 +845,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
       })
     }
 
-    if (pending.action === 'titrate') get().advanceClock(order.interval.minMinutes)
+    if (pending.action === 'titrate') applyPacingTrigger(get, set, order.id, crossedEarlyThreshold)
+
+    get().advanceClock(order.interval.minMinutes)
   },
 
   cancelDoseOverride: () => {
@@ -775,6 +880,86 @@ export const useSimStore = create<SimStore>((set, get) => ({
         message: pending.reasons.join(' '),
       },
     }))
+  },
+
+  dismissCheckpoint: () => set({ pendingCheckpoint: null }),
+
+  dismissPacingOffer: () => set({ pendingPacingOffer: null }),
+
+  runGuidedTitrationLeap: (orderId, targetDose) => {
+    const state = get()
+    const matchesCheckpoint = state.pendingCheckpoint?.orderId === orderId
+    const matchesPacingOffer = state.pendingPacingOffer?.orderId === orderId
+    if (!matchesCheckpoint && !matchesPacingOffer) return
+    const order = get().orders.find((o) => o.id === orderId)
+    const infusion = get().infusions.find((i) => i.orderId === orderId)
+    set({ pendingCheckpoint: null, pendingPacingOffer: null })
+    if (!order || !infusion || infusion.status !== 'infusing') return
+    const drug = getDrug(order.drugId)
+    const plan = computeGuidedLeapDoses(infusion.rate, order.increment, order.maxDose, targetDose)
+
+    let appliedCount = 0
+    let interruptedByCheckpoint = false
+    for (const dose of plan.doses) {
+      const s = get()
+      if (meetsTarget(s.vitals.map, order.target)) break
+      const currentInfusion = s.infusions.find((i) => i.orderId === orderId) ?? null
+      // A leap that starts below the clinical threshold (e.g. from a pacing offer, unlike
+      // the clinical checkpoint's own leap, which always starts AT the crossing dose) can
+      // cross it mid-flight — check every step, not just once at the start.
+      const crossedThisStep = crossedEarlyNotificationThreshold(order, currentInfusion?.rate ?? 0, dose, s.vitals.map)
+      const actionEntry: LogEntry = {
+        id: nextId('log'),
+        minute: s.clockMinutes,
+        type: 'action',
+        summary: `Titrate ${drug.name} to ${dose} ${drug.unit} — applied (guided titration leap).`,
+        orderId: order.id,
+        drugId: order.drugId,
+        doseAction: 'titrate',
+        dose,
+        outcome: 'applied',
+        autoGeneratedByLeap: true,
+        earlyNotificationDue: crossedThisStep || undefined,
+      }
+      const vitalsEntry: LogEntry = { ...buildVitalsLogEntry(s.clockMinutes, s.vitals, s.clockMinutes), autoGeneratedByLeap: true }
+      const applyUpdate = computeApplyUpdate(s, order, drug, currentInfusion, 'titrate', dose)
+      set({
+        infusions: applyUpdate.infusions,
+        log: [...applyUpdate.log, vitalsEntry, actionEntry],
+        lastPhysiologyUpdate: applyUpdate.lastPhysiologyUpdate,
+        adherenceFlags: { ...s.adherenceFlags, [actionEntry.id]: true },
+      })
+      appliedCount += 1
+      get().advanceClock(order.interval.minMinutes)
+      if (crossedThisStep) {
+        // Stop here — the same real decision a manually-titrating nurse would hit at this
+        // exact dose takes over; no "leap complete" toast competing with the checkpoint.
+        set((st) => ({
+          pendingCheckpoint: { orderId: order.id, doseAtTrigger: dose, mapAtTrigger: s.vitals.map, triggeredAtMinute: s.clockMinutes },
+          pacingTitrationsSinceOffer: { ...st.pacingTitrationsSinceOffer, [orderId]: 0 },
+        }))
+        interruptedByCheckpoint = true
+        break
+      }
+    }
+
+    if (!interruptedByCheckpoint) {
+      const finalRate = get().infusions.find((i) => i.orderId === orderId)?.rate
+      set({
+        feedback:
+          appliedCount > 0
+            ? {
+                tone: 'success',
+                title: 'Guided titration complete',
+                message: `${drug.name} titrated to ${finalRate} ${drug.unit} over ${appliedCount} step${appliedCount === 1 ? '' : 's'}. Review the timeline for each step's charted vitals.`,
+              }
+            : {
+                tone: 'info',
+                title: 'No titration needed',
+                message: `${order.target.metric} target is already met — no additional steps were applied.`,
+              },
+      })
+    }
   },
 
   notifyProvider: (orderId, reason) => {

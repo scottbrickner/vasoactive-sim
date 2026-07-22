@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { checkCadence, correctLocationFor, isCorrectlyPlaced } from '../engine/documentation'
+import { buildCadenceStatusForOrders, buildOutstandingChartingItems, checkCadence, correctLocationFor, isCorrectlyPlaced } from '../engine/documentation'
+import type { Infusion, LogEntry, Order } from '../state/types'
 
 describe('documentation.correctLocationFor', () => {
   it('places Begin Bag, initial rate, and discontinuation in MAR', () => {
@@ -74,5 +75,115 @@ describe('documentation.checkCadence', () => {
       'preTitration2',
       'plus30PostTitration2',
     ])
+  })
+})
+
+const norepiOrder: Order = {
+  id: 'order-norepi',
+  drugId: 'norepinephrine',
+  sequence: 1,
+  startDose: 0.5,
+  maxDose: 30,
+  increment: 0.5,
+  interval: { minMinutes: 3, maxMinutes: 5 },
+  target: { metric: 'MAP', comparator: '>=', value: 65, unit: 'mmHg' },
+}
+
+function doseEntry(overrides: Partial<LogEntry> = {}): LogEntry {
+  return {
+    id: 'entry',
+    minute: 0,
+    type: 'action',
+    summary: '',
+    orderId: norepiOrder.id,
+    doseAction: 'initiate',
+    outcome: 'applied',
+    ...overrides,
+  }
+}
+
+function chartEntry(id: string, minute: number): LogEntry {
+  return { id, minute, type: 'documentation', location: 'iView', summary: '' }
+}
+
+function norepiInfusion(overrides: Partial<Infusion> = {}): Infusion {
+  return {
+    id: 'infusion-norepi',
+    orderId: norepiOrder.id,
+    drugId: 'norepinephrine',
+    status: 'infusing',
+    rate: 0.5,
+    initialRate: 0.5,
+    channel: 'A',
+    beginBagCompleted: true,
+    lastActionMinute: 0,
+    stoppedAtMinute: null,
+    rateBeforePause: null,
+    ...overrides,
+  }
+}
+
+// buildCadenceStatusForOrders/buildOutstandingChartingItems (Phase 12d) are the shared
+// source both scoring.ts's debrief category and the live CernerChartingStatus view build
+// on — see engine/documentation.ts's doc comment.
+describe('documentation.buildCadenceStatusForOrders', () => {
+  it("returns one status per order with a real initiation entry, anchored to that entry's minute", () => {
+    const doseEntries = [doseEntry({ id: 'e1', minute: 0, doseAction: 'initiate' })]
+    const statuses = buildCadenceStatusForOrders([norepiOrder], [norepiInfusion()], doseEntries, [0])
+    expect(statuses).toHaveLength(1)
+    expect(statuses[0]).toMatchObject({ orderId: norepiOrder.id, drugId: 'norepinephrine' })
+    expect(statuses[0].checks.find((c) => c.point === 'initiation')?.met).toBe(true)
+  })
+
+  it('anchors to minute 0 for a pre-seeded infusion with no real initiation entry', () => {
+    const statuses = buildCadenceStatusForOrders([norepiOrder], [norepiInfusion()], [], [0])
+    expect(statuses).toHaveLength(1)
+    expect(statuses[0].checks.find((c) => c.point === 'initiation')?.dueAtMinute).toBe(0)
+  })
+
+  it('returns nothing for an order whose infusion never started (still hanging, no entries)', () => {
+    const statuses = buildCadenceStatusForOrders([norepiOrder], [norepiInfusion({ status: 'hanging' })], [], [])
+    expect(statuses).toEqual([])
+  })
+
+  it('includes a preTitration/plus30PostTitration pair for each titrate entry', () => {
+    const doseEntries = [
+      doseEntry({ id: 'e1', minute: 0, doseAction: 'initiate' }),
+      doseEntry({ id: 'e2', minute: 10, doseAction: 'titrate' }),
+    ]
+    const statuses = buildCadenceStatusForOrders([norepiOrder], [norepiInfusion()], doseEntries, [0])
+    expect(statuses[0].checks.map((c) => c.point)).toEqual([
+      'initiation',
+      'plus30Start',
+      'preTitration',
+      'plus30PostTitration',
+    ])
+  })
+})
+
+describe('documentation.buildOutstandingChartingItems', () => {
+  it('is empty when everything due so far is charted and verified', () => {
+    const doseEntries = [doseEntry({ id: 'e1', minute: 0, doseAction: 'initiate' })]
+    const log = [...doseEntries, chartEntry('c1', 0), chartEntry('c2', 30)]
+    const items = buildOutstandingChartingItems([norepiOrder], [norepiInfusion()], log, { e1: true })
+    expect(items).toEqual([])
+  })
+
+  it('names each unmet checkpoint by drug name', () => {
+    const doseEntries = [doseEntry({ id: 'e1', minute: 0, doseAction: 'initiate' })]
+    const items = buildOutstandingChartingItems([norepiOrder], [norepiInfusion()], doseEntries, { e1: true })
+    expect(items.length).toBeGreaterThan(0)
+    expect(items.every((item) => item.startsWith('Norepinephrine:'))).toBe(true)
+  })
+
+  it('flags an initiate entry that lacks verification', () => {
+    const doseEntries = [doseEntry({ id: 'e1', minute: 0, doseAction: 'initiate' })]
+    const items = buildOutstandingChartingItems([norepiOrder], [norepiInfusion()], doseEntries, {})
+    expect(items.some((item) => /not yet verified/.test(item))).toBe(true)
+  })
+
+  it('is empty for an order whose infusion never started', () => {
+    const items = buildOutstandingChartingItems([norepiOrder], [norepiInfusion({ status: 'hanging' })], [], {})
+    expect(items).toEqual([])
   })
 })

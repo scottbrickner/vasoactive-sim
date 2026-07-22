@@ -42,6 +42,10 @@ describe('app shell', () => {
     expect(screen.getByRole('heading', { name: 'Bedside workspace' })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /End .* go to debrief/ }))
+    // ScenarioIntro picks randomly; a scenario with pre-seeded infusions (nothing charted
+    // yet) triggers the soft pre-end warning (Phase 12d) — confirm through it if present.
+    const confirmButton = screen.queryByRole('button', { name: /Submit for grading|Confirm and continue/ })
+    if (confirmButton) await user.click(confirmButton)
     expect(screen.getByRole('heading', { name: "Nice work — let's review" })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Restart simulation' }))

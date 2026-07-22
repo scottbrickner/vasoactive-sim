@@ -69,7 +69,12 @@ export function ScenarioIntro() {
 
       <Toast tone="info" title="How this works">
         Open any resource at any time. Every action is checked against the order and CP 4-156 — you'll
-        see guidance inline, not a wall of red.
+        see guidance inline, not a wall of red. BCMA/I-TRACE verification happens once, when you enter
+        the starting dose — Begin Bag itself doesn't gate you again. Time auto-advances by the order's
+        own interval after you start a dose and after each titration; the manual "+3/+5/+30 min"
+        buttons are only for waiting longer or catching up on charting. If you keep titrating without
+        reaching target, you'll get an offer to fast-forward the routine climb. Check Charting Status
+        any time to see what's charted/verified and what's still due before you end the session.
       </Toast>
 
       <Panel title="Session mode">
