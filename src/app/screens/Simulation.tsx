@@ -321,6 +321,8 @@ export function Simulation() {
           <TitrationTimeline
             log={log}
             vitalsHistory={vitalsHistory}
+            orders={orders}
+            infusions={infusions}
             disabled={locked}
             onChartRetrospective={chartRetrospective}
           />
