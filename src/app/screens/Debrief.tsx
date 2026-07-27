@@ -1,7 +1,11 @@
-import { Button, Panel } from '../../design/primitives'
+import { Button, Panel, Toast } from '../../design/primitives'
 import { useSimStore } from '../../state/store'
+import { useSkillTrackingStore } from '../../state/skillTrackingStore'
 import { scoreSession, type ScoreStatus } from '../../engine/scoring'
+import type { AttemptRecord } from '../../engine/skillAttempt'
+import { SKILL_SIGNOFF_CRITERIA } from '../../data/policy'
 import { DocumentationReview } from '../../devices'
+import { SkillAttemptPanel } from '../SkillAttemptPanel'
 
 const STATUS_STYLE: Record<ScoreStatus, { label: string; className: string }> = {
   met: { label: 'Met', className: 'bg-success/12 text-success' },
@@ -27,6 +31,9 @@ export function Debrief() {
 
   const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory })
 
+  const skillAttempts = useSkillTrackingStore((s) => s.skillAttempts)
+  const lastAttempt = skillAttempts[skillAttempts.length - 1] ?? null
+
   const handleRestart = () => {
     // ScenarioIntro owns its own random scenario pick (see that file) and calls
     // startScenario itself once the learner clicks "Begin simulation" again.
@@ -42,6 +49,8 @@ export function Debrief() {
           Your scorecard and coaching summary, grounded in the order and CP 4-156.
         </p>
       </div>
+
+      {lastAttempt && <SkillAttemptBanner attempt={lastAttempt} />}
 
       <Panel
         title="Scorecard"
@@ -110,11 +119,45 @@ export function Debrief() {
 
       <DocumentationReview log={log} />
 
+      <SkillAttemptPanel record={lastAttempt} />
+
       <div>
         <Button variant="secondary" onClick={handleRestart}>
           Restart simulation
         </Button>
       </div>
     </div>
+  )
+}
+
+/**
+ * Skill sign-off outcome for this debrief's just-recorded attempt (Phase 15) — reads
+ * the already-built AttemptRecord (see Simulation.tsx's recordThisAttempt), no
+ * re-derivation needed. Non-punitive framing for a non-pass: names the specific gap
+ * against the threshold and points at the Coaching Summary below, rather than a bare
+ * "failed."
+ */
+function SkillAttemptBanner({ attempt }: { attempt: AttemptRecord }) {
+  if (attempt.mode !== 'validation') {
+    return (
+      <Toast tone="info" title="Training run">
+        This attempt doesn't count toward the skill sign-off requirement. Switch to Validation mode on
+        the intro screen to attempt it.
+      </Toast>
+    )
+  }
+  if (attempt.passed) {
+    return (
+      <Toast tone="success" title="Validation passed">
+        The skill sign-off requirement is met — see "Save this attempt" below to keep a record.
+      </Toast>
+    )
+  }
+  return (
+    <Toast tone="warning" title="Validation attempt did not pass">
+      {`Scored ${attempt.overallPercent ?? '—'}% — meeting the requirement needs at least ` +
+        `${SKILL_SIGNOFF_CRITERIA.minOverallPercent}% with no category scored "missed." Review the ` +
+        'opportunities below and try another validation run when ready.'}
+    </Toast>
   )
 }

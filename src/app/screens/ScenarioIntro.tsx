@@ -1,6 +1,8 @@
 import { useState } from 'react'
-import { Button, Panel, Toast } from '../../design/primitives'
+import { Button, Field, Panel, Toast } from '../../design/primitives'
 import { useSimStore } from '../../state/store'
+import { useSkillTrackingStore } from '../../state/skillTrackingStore'
+import { isValidInstitutionalEmail } from '../../lib/learnerIdentity'
 import { SCENARIOS } from '../../data/scenarios'
 import type { ScenarioConfig, SimMode } from '../../state/types'
 
@@ -32,7 +34,19 @@ export function ScenarioIntro() {
   const primaryTarget = orders.find((o) => o.sequence === 1)?.target
   const [mode, setMode] = useState<SimMode>('training')
 
+  const learnerIdentity = useSkillTrackingStore((s) => s.learnerIdentity)
+  const setLearnerIdentity = useSkillTrackingStore((s) => s.setLearnerIdentity)
+  const [learnerName, setLearnerName] = useState(learnerIdentity?.name ?? '')
+  const [learnerEmail, setLearnerEmail] = useState(learnerIdentity?.email ?? '')
+  const emailTouched = learnerEmail.trim().length > 0
+  const emailValid = isValidInstitutionalEmail(learnerEmail)
+  const identityOk = learnerName.trim().length > 0 && emailValid
+  const beginDisabled = mode === 'validation' && !identityOk
+
   const handleBegin = () => {
+    if (learnerName.trim() || learnerEmail.trim()) {
+      setLearnerIdentity({ name: learnerName.trim(), email: learnerEmail.trim() })
+    }
     startScenario(scenario, mode)
     setPhase('sim')
   }
@@ -77,6 +91,29 @@ export function ScenarioIntro() {
         any time to see what's charted/verified and what's still due before you end the session.
       </Toast>
 
+      <Panel title="Learner identity">
+        <p className="text-sm text-muted">
+          Required to begin a Validation-mode run; optional for Training. Saved on this browser and
+          reused next time.
+        </p>
+        <div className="mt-3 grid gap-4 sm:grid-cols-2">
+          <Field
+            label="Name"
+            value={learnerName}
+            onChange={(e) => setLearnerName(e.target.value)}
+            placeholder="Jane Doe"
+          />
+          <Field
+            label="Institutional email"
+            type="email"
+            value={learnerEmail}
+            onChange={(e) => setLearnerEmail(e.target.value)}
+            placeholder="you@med.usc.edu"
+            error={emailTouched && !emailValid ? 'Must be an institutional email (ends in @med.usc.edu).' : undefined}
+          />
+        </div>
+      </Panel>
+
       <Panel title="Session mode">
         <div className="flex flex-col gap-3 sm:flex-row">
           {(Object.keys(MODE_COPY) as SimMode[]).map((m) => (
@@ -97,9 +134,14 @@ export function ScenarioIntro() {
       </Panel>
 
       <div>
-        <Button size="lg" onClick={handleBegin}>
+        <Button size="lg" onClick={handleBegin} disabled={beginDisabled}>
           Begin simulation
         </Button>
+        {beginDisabled && (
+          <p className="mt-2 text-sm text-muted">
+            Enter your name and institutional email above to begin a Validation-mode run.
+          </p>
+        )}
       </div>
     </div>
   )

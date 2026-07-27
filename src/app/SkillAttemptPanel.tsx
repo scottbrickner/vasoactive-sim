@@ -1,0 +1,114 @@
+import { useEffect, useState } from 'react'
+import { Button, Panel } from '../design/primitives'
+import type { AttemptRecord } from '../engine/skillAttempt'
+import {
+  attemptFiles,
+  exportAttemptCSV,
+  exportAttemptJSON,
+} from '../sync/skillAttemptExport'
+import { getSavedFolder, isFolderSaveSupported, pickTeamsFolder, writeFileToFolder } from '../sync/teamsFolder'
+
+type FolderState =
+  | { status: 'idle' }
+  | { status: 'checking' }
+  | { status: 'need-picker' }
+  | { status: 'saving' }
+  | { status: 'saved'; folderName: string }
+  | { status: 'error' }
+
+/**
+ * Simplified port of zoll-r-series-simulator's SignoffPanel.jsx — no evaluator
+ * name/email/title fields, no human-override step: there's no facilitator/evaluator
+ * role gating debrief in vasoactive-sim the way ZOLL's SME does, and the pass/fail
+ * here is fully automatic from the scorecard (see engine/scoring.ts's isSkillPassed).
+ * If the institution ever wants a proctor able to contest an automatic result,
+ * ProctorRecord (state/types.ts) already exists as the natural anchor for that later.
+ *
+ * On mount, silently auto-saves JSON+CSV into a previously-picked local folder if
+ * permission is still granted (Chrome/Edge only) — otherwise offers a one-time folder
+ * picker. Every browser also gets plain JSON/CSV download buttons regardless.
+ */
+export function SkillAttemptPanel({ record }: { record: AttemptRecord | null }) {
+  const [folderState, setFolderState] = useState<FolderState>({ status: 'idle' })
+
+  useEffect(() => {
+    if (!record || !isFolderSaveSupported()) return
+    let cancelled = false
+    ;(async () => {
+      setFolderState({ status: 'checking' })
+      const handle = await getSavedFolder().catch(() => null)
+      if (cancelled) return
+      if (!handle) {
+        setFolderState({ status: 'need-picker' })
+        return
+      }
+      try {
+        const files = attemptFiles(record)
+        await writeFileToFolder(handle, files.json.name, files.json.contents)
+        await writeFileToFolder(handle, files.csv.name, files.csv.contents)
+        if (!cancelled) setFolderState({ status: 'saved', folderName: handle.name })
+      } catch {
+        if (!cancelled) setFolderState({ status: 'error' })
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [record])
+
+  if (!record) return null
+
+  const chooseFolder = async () => {
+    setFolderState({ status: 'saving' })
+    try {
+      const handle = await pickTeamsFolder()
+      const files = attemptFiles(record)
+      await writeFileToFolder(handle, files.json.name, files.json.contents)
+      await writeFileToFolder(handle, files.csv.name, files.csv.contents)
+      setFolderState({ status: 'saved', folderName: handle.name })
+    } catch (err) {
+      const isAbort = (err as { name?: string } | null)?.name === 'AbortError'
+      setFolderState({ status: isAbort ? 'need-picker' : 'error' })
+    }
+  }
+
+  return (
+    <Panel title="Save this attempt">
+      {isFolderSaveSupported() ? (
+        <div className="flex flex-col gap-3">
+          {(folderState.status === 'checking' || folderState.status === 'saving') && (
+            <p className="text-sm text-muted">Saving to the Teams folder…</p>
+          )}
+          {folderState.status === 'saved' && (
+            <p className="text-sm text-ink">Saved to the "{folderState.folderName}" folder.</p>
+          )}
+          {(folderState.status === 'need-picker' || folderState.status === 'error') && (
+            <Button onClick={chooseFolder}>
+              {folderState.status === 'error' ? "Couldn't save — retry" : 'Save to Teams folder'}
+            </Button>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {folderState.status === 'saved' && (
+              <Button variant="ghost" onClick={chooseFolder}>
+                Change folder
+              </Button>
+            )}
+            <Button variant="ghost" onClick={() => exportAttemptJSON(record)}>
+              Download JSON instead
+            </Button>
+            <Button variant="ghost" onClick={() => exportAttemptCSV(record)}>
+              Download CSV instead
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={() => exportAttemptJSON(record)}>Download record (JSON)</Button>
+          <Button variant="secondary" onClick={() => exportAttemptCSV(record)}>
+            Download record (CSV)
+          </Button>
+        </div>
+      )}
+    </Panel>
+  )
+}

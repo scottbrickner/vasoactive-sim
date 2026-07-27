@@ -2,6 +2,7 @@ import { AppShell } from './app/AppShell'
 import { ScenarioIntro } from './app/screens/ScenarioIntro'
 import { Simulation } from './app/screens/Simulation'
 import { Debrief } from './app/screens/Debrief'
+import { SkillStatus } from './app/screens/SkillStatus'
 import { Launcher } from './app/facilitator/Launcher'
 import { FacilitatorRoot } from './app/facilitator/FacilitatorRoot'
 import { useSimStore } from './state/store'
@@ -33,6 +34,7 @@ export default function App() {
       {phase === 'intro' && <ScenarioIntro />}
       {phase === 'sim' && <Simulation />}
       {phase === 'debrief' && <Debrief />}
+      {phase === 'skillStatus' && <SkillStatus />}
     </AppShell>
   )
 }

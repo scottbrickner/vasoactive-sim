@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Button, Panel } from '../../design/primitives'
 import { useSimStore } from '../../state/store'
 import { SCENARIOS } from '../../data/scenarios'
@@ -22,8 +22,16 @@ export function FacilitatorConsole({ children }: { children?: ReactNode }) {
   const startScenario = useSimStore((s) => s.startScenario)
   const setPhase = useSimStore((s) => s.setPhase)
 
-  function pickScenario(id: string) {
-    const picked = SCENARIOS[id]
+  // Clicking a scenario card only selects a candidate — it doesn't touch the shared
+  // store (and therefore doesn't move the learner window) until the facilitator
+  // explicitly clicks "Start session for learner" below. Previously one click did
+  // both at once, with no confirmation step and no visible sign of what just happened
+  // on the learner's screen.
+  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null)
+  const sentToLearner = phase !== 'intro' && selectedScenarioId != null && scenario.id === selectedScenarioId
+
+  function startSelectedScenario() {
+    const picked = selectedScenarioId ? SCENARIOS[selectedScenarioId] : null
     if (!picked) return
     // Skips ScenarioIntro's own independent random pick entirely — the facilitator has
     // effectively already briefed by choosing here, so the learner window goes
@@ -38,7 +46,7 @@ export function FacilitatorConsole({ children }: { children?: ReactNode }) {
         <h1 className="text-2xl font-bold text-ink">Session console</h1>
         {proctor && (
           <p className="mt-1 text-sm text-muted">
-            Proctor: {proctor.name} · started {new Date(proctor.recordedAt).toLocaleTimeString()}
+            Proctor: {proctor.name} ({proctor.email}) · started {new Date(proctor.recordedAt).toLocaleTimeString()}
           </p>
         )}
       </div>
@@ -49,9 +57,10 @@ export function FacilitatorConsole({ children }: { children?: ReactNode }) {
             <button
               key={s.id}
               type="button"
-              onClick={() => pickScenario(s.id)}
+              onClick={() => setSelectedScenarioId(s.id)}
+              aria-pressed={selectedScenarioId === s.id}
               className={`rounded-md border px-4 py-3 text-left transition-colors ${
-                scenario.id === s.id && phase !== 'intro'
+                selectedScenarioId === s.id
                   ? 'border-cardinal bg-cardinal/6'
                   : 'border-border bg-surface hover:bg-cardinal/4'
               }`}
@@ -64,10 +73,14 @@ export function FacilitatorConsole({ children }: { children?: ReactNode }) {
             </button>
           ))}
         </div>
-        <div className="mt-3">
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <Button disabled={!selectedScenarioId} onClick={startSelectedScenario}>
+            Start session for learner
+          </Button>
           <Button variant="secondary" onClick={() => setPhase('intro')}>
             Reset to intro
           </Button>
+          {sentToLearner && <span className="text-sm font-medium text-success">Learner is on this scenario now.</span>}
         </div>
       </Panel>
 

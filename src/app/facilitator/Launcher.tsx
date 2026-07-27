@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Button, Field, Panel } from '../../design/primitives'
 import { useSimStore } from '../../state/store'
+import { isValidInstitutionalEmail } from '../../lib/learnerIdentity'
 import { initSimSync } from '../../sync/simSync'
 import { newSessionId } from '../../sync/sessionKeys'
 
@@ -16,9 +17,14 @@ type WindowRole = 'learner' | 'facilitator'
 export function Launcher() {
   const [sessionId, setSessionId] = useState(newSessionId)
   const [proctorName, setProctorName] = useState('')
+  const [proctorEmail, setProctorEmail] = useState('')
   const [copied, setCopied] = useState<WindowRole | null>(null)
   const proctor = useSimStore((s) => s.proctor)
   const setProctor = useSimStore((s) => s.setProctor)
+
+  const proctorEmailTouched = proctorEmail.trim().length > 0
+  const proctorEmailValid = isValidInstitutionalEmail(proctorEmail)
+  const proctorReady = proctorName.trim().length > 0 && proctorEmailValid
 
   const linkFor = (role: WindowRole) =>
     `${window.location.origin}${window.location.pathname}?role=${role}&session=${sessionId}`
@@ -42,9 +48,9 @@ export function Launcher() {
   }
 
   function handleStartProctoring() {
-    if (!proctorName.trim()) return
+    if (!proctorReady) return
     initSimSync(sessionId)
-    setProctor(proctorName.trim())
+    setProctor(proctorName.trim(), proctorEmail.trim())
   }
 
   return (
@@ -82,13 +88,26 @@ export function Launcher() {
             placeholder="Who's proctoring this session?"
             className="flex-1"
           />
-          <Button variant="secondary" onClick={handleStartProctoring} disabled={!proctorName.trim()}>
+          <Field
+            label="Institutional email"
+            type="email"
+            value={proctorEmail}
+            onChange={(e) => setProctorEmail(e.target.value)}
+            placeholder="you@med.usc.edu"
+            error={
+              proctorEmailTouched && !proctorEmailValid
+                ? 'Must be an institutional email (ends in @med.usc.edu).'
+                : undefined
+            }
+            className="flex-1"
+          />
+          <Button variant="secondary" onClick={handleStartProctoring} disabled={!proctorReady}>
             Start proctoring
           </Button>
         </div>
         {proctor && (
           <p className="mt-3 text-sm text-muted">
-            Recorded: {proctor.name}, {new Date(proctor.recordedAt).toLocaleString()}
+            Recorded: {proctor.name} ({proctor.email}), {new Date(proctor.recordedAt).toLocaleString()}
           </p>
         )}
       </Panel>

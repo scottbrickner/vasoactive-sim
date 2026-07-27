@@ -1078,18 +1078,20 @@ describe('store — proctor record', () => {
     expect(useSimStore.getState().proctor).toBeNull()
   })
 
-  it('setProctor stamps a name and an ISO timestamp', () => {
-    useSimStore.getState().setProctor('J. Rivera')
+  it('setProctor stamps a name, a separate email, and an ISO timestamp', () => {
+    useSimStore.getState().setProctor('J. Rivera', 'j.rivera@med.usc.edu')
     const { proctor } = useSimStore.getState()
     expect(proctor?.name).toBe('J. Rivera')
+    expect(proctor?.email).toBe('j.rivera@med.usc.edu')
     expect(proctor?.recordedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     useSimStore.setState({ proctor: null })
   })
 
   it('survives a scenario restart (unlike the rest of sim state)', () => {
-    useSimStore.getState().setProctor('J. Rivera')
+    useSimStore.getState().setProctor('J. Rivera', 'j.rivera@med.usc.edu')
     useSimStore.getState().startScenario(DEFAULT_SCENARIO, 'training')
     expect(useSimStore.getState().proctor?.name).toBe('J. Rivera')
+    expect(useSimStore.getState().proctor?.email).toBe('j.rivera@med.usc.edu')
     useSimStore.setState({ proctor: null })
   })
 })

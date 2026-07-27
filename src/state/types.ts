@@ -5,8 +5,12 @@
  * lives in src/engine/ and operates on these types; scoring.ts (debrief) is Phase 6.
  */
 
-/** The three top-level phases of the learner flow. Mirrors the eventual SimState.phase. */
-export type Phase = 'intro' | 'sim' | 'debrief'
+/**
+ * The top-level phases of the learner flow. Mirrors the eventual SimState.phase.
+ * 'skillStatus' (Phase 15) is a standalone read-only page, not part of the sim loop
+ * itself — reachable from the header at any point outside an active 'sim' run.
+ */
+export type Phase = 'intro' | 'sim' | 'debrief' | 'skillStatus'
 
 /**
  * Training mode coaches in real time and lets the learner override an off-order dose
@@ -25,6 +29,8 @@ export type SimMode = 'training' | 'validation'
  */
 export interface ProctorRecord {
   name: string
+  /** Institutional email, separate from name for tracking ease (Phase 15 follow-up) — validated via lib/learnerIdentity.ts's isValidInstitutionalEmail. */
+  email: string
   /** ISO 8601 timestamp of when "Start proctoring" was pressed. */
   recordedAt: string
 }

@@ -3,6 +3,7 @@ import { cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from '../App'
 import { useSimStore } from '../state/store'
+import { useSkillTrackingStore } from '../state/skillTrackingStore'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
 
 afterEach(() => {
@@ -10,6 +11,10 @@ afterEach(() => {
   // Reset the sim store between tests so each test starts from a clean 'intro' state.
   useSimStore.getState().startScenario(DEFAULT_SCENARIO, 'training')
   useSimStore.setState({ phase: 'intro' })
+  // Phase 15: the skill-tracking store is separate from useSimStore and persists to
+  // localStorage — reset both so learner identity doesn't leak across tests/files.
+  localStorage.clear()
+  useSkillTrackingStore.setState({ learnerIdentity: null, skillAttempts: [] })
 })
 
 describe('app shell', () => {
@@ -50,5 +55,25 @@ describe('app shell', () => {
 
     await user.click(screen.getByRole('button', { name: 'Restart simulation' }))
     expect(screen.getByRole('heading', { name: 'Welcome to the simulation' })).toBeInTheDocument()
+  })
+
+  it('gates "Begin simulation" on a valid learner identity only in Validation mode (Phase 15)', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    // Training mode (the default): no identity required, zero new friction.
+    expect(screen.getByRole('button', { name: 'Begin simulation' })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: /^Validation/ }))
+    expect(screen.getByRole('button', { name: 'Begin simulation' })).toBeDisabled()
+
+    await user.type(screen.getByLabelText('Name'), 'Jane Doe')
+    await user.type(screen.getByLabelText('Institutional email'), 'jane.doe@gmail.com')
+    expect(screen.getByRole('button', { name: 'Begin simulation' })).toBeDisabled()
+    expect(screen.getByText(/Must be an institutional email/)).toBeInTheDocument()
+
+    await user.clear(screen.getByLabelText('Institutional email'))
+    await user.type(screen.getByLabelText('Institutional email'), 'jane.doe@med.usc.edu')
+    expect(screen.getByRole('button', { name: 'Begin simulation' })).toBeEnabled()
   })
 })

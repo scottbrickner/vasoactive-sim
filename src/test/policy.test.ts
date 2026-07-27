@@ -6,6 +6,7 @@ import {
   MEDICATION_VERIFICATION,
   OFF_FOR_TWO_HOURS_RULE,
   RESTART_AFTER_PAUSE_RULE,
+  SKILL_SIGNOFF_CRITERIA,
   STABLE_OFF_TWO_HOURS_RULE,
 } from '../data/policy'
 
@@ -49,5 +50,10 @@ describe('policy constants (CP 4-156)', () => {
         'Physiological parameters evaluated',
       ]),
     )
+  })
+
+  it('defines the skill sign-off threshold (Phase 15) as a 90% bar with no missed category allowed', () => {
+    expect(SKILL_SIGNOFF_CRITERIA.minOverallPercent).toBe(90)
+    expect(SKILL_SIGNOFF_CRITERIA.requireNoMissedCategory).toBe(true)
   })
 })

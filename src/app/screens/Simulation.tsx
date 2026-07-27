@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { Button, InlineConfirm, Toast } from '../../design/primitives'
 import { priorAgentsActivationMet, useSimStore, type PendingOverride } from '../../state/store'
+import { useSkillTrackingStore } from '../../state/skillTrackingStore'
 import { getDrug } from '../../data/formulary'
 import { buildOutstandingChartingItems } from '../../engine/documentation'
+import { scoreSession } from '../../engine/scoring'
 import {
   AlarisPump,
   CernerChartingStatus,
@@ -95,6 +97,8 @@ export function Simulation() {
   const orders = useSimStore((s) => s.orders)
   const log = useSimStore((s) => s.log)
   const verificationFlags = useSimStore((s) => s.verificationFlags)
+  const adherenceFlags = useSimStore((s) => s.adherenceFlags)
+  const blockOfChartingHistory = useSimStore((s) => s.blockOfChartingHistory)
   const vitalsHistory = useSimStore((s) => s.vitalsHistory)
   const feedback = useSimStore((s) => s.feedback)
   const dismissFeedback = useSimStore((s) => s.dismissFeedback)
@@ -118,6 +122,7 @@ export function Simulation() {
   const pendingPacingOffer = useSimStore((s) => s.pendingPacingOffer)
   const dismissPacingOffer = useSimStore((s) => s.dismissPacingOffer)
   const runGuidedTitrationLeap = useSimStore((s) => s.runGuidedTitrationLeap)
+  const recordAttempt = useSkillTrackingStore((s) => s.recordAttempt)
 
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
   const [showSubmitConfirm, setShowSubmitConfirm] = useState(false)
@@ -160,12 +165,25 @@ export function Simulation() {
 
   const outstandingItems = buildOutstandingChartingItems(orders, infusions, log, verificationFlags)
 
+  // Records this run (training or validation) into the skill-tracking store (Phase 15)
+  // right before every debrief arrival — a separate store from useSimStore, so a
+  // facilitated session's cross-window state broadcast (Phase 10) never overwrites it.
+  // Only a validation-mode pass counts toward the "My Skill Status" requirement; see
+  // engine/skillAttempt.ts's buildAttemptRecord.
+  function recordThisAttempt() {
+    const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory })
+    recordAttempt({ card, scenarioId: scenario.id, scenarioLabel: scenario.admissionReason, mode })
+  }
+
   function handleEndClick() {
     // Soft warning only — never a hard block (documentation cadence is flagged, not
     // blocked, everywhere else in this sim). Fires in validation mode (a graded
     // submission) or whenever something's still outstanding, in either mode.
     if (mode === 'validation' || outstandingItems.length > 0) setShowSubmitConfirm(true)
-    else setPhase('debrief')
+    else {
+      recordThisAttempt()
+      setPhase('debrief')
+    }
   }
 
   const pendingInfo = pendingAction ? buildPendingInfo(pendingAction, orders) : null
@@ -247,6 +265,7 @@ export function Simulation() {
           outstandingItems={outstandingItems}
           onConfirm={() => {
             setShowSubmitConfirm(false)
+            recordThisAttempt()
             setPhase('debrief')
           }}
           onCancel={() => setShowSubmitConfirm(false)}

@@ -131,3 +131,19 @@ export const BLOCK_OF_CHARTING = {
     'titration, the RN may titrate as needed and document these elements; the provider is ' +
     'notified as soon as reasonably possible; a new block starts if the episode exceeds 4 hours.',
 }
+
+/**
+ * Automatic pass/fail threshold for the skill sign-off requirement (Phase 15) — see
+ * engine/scoring.ts's isSkillPassed. Not a CP 4-156 clinical rule like the constants
+ * above — a training-program assessment bar, kept here rather than hardcoded in a
+ * component per this project's "no hard-coded clinical/assessment values in
+ * components" convention. Only ever evaluated for a validation-mode debrief; training
+ * runs never count toward the requirement regardless of score.
+ */
+export const SKILL_SIGNOFF_CRITERIA = {
+  minOverallPercent: 90,
+  requireNoMissedCategory: true,
+  description:
+    "A validation-mode run meets the skill sign-off requirement when the debrief scorecard's " +
+    'overall percent is at least 90% and no category is scored "missed."',
+}

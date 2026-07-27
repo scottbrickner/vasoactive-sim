@@ -368,7 +368,7 @@ interface SimStore {
 
   setPhase: (phase: Phase) => void
   /** Stamps the current time and records who's proctoring this session (see ProctorRecord doc). */
-  setProctor: (name: string) => void
+  setProctor: (name: string, email: string) => void
   /** (Re)initializes the live sim state from a scenario config — used by both "Begin simulation" and "Restart simulation". */
   startScenario: (scenario: ScenarioConfig, mode: SimMode) => void
   dismissFeedback: () => void
@@ -463,7 +463,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   ...initialSimFields(DEFAULT_SCENARIO, 'training'),
 
   setPhase: (phase) => set({ phase }),
-  setProctor: (name) => set({ proctor: { name, recordedAt: new Date().toISOString() } }),
+  setProctor: (name, email) => set({ proctor: { name, email, recordedAt: new Date().toISOString() } }),
 
   startScenario: (nextScenario, mode) => set((s) => initialSimFields(nextScenario, mode, s.vitalOverrides)),
 

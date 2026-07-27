@@ -12,6 +12,7 @@
  * covered by formulary.test.ts, not a per-session learner behavior).
  */
 import { buildCadenceStatusForOrders } from './documentation'
+import { SKILL_SIGNOFF_CRITERIA } from '../data/policy'
 import type { BlockOfChartingRecord, Infusion, LogEntry, Order } from '../state/types'
 
 export interface ScoringInput {
@@ -252,4 +253,20 @@ export function scoreSession(input: ScoringInput): Scorecard {
     .map((c) => `${c.label}: ${c.detail}`)
 
   return { categories, overallPercent, strengths, opportunities }
+}
+
+/**
+ * Automatic pass/fail for the skill sign-off requirement (Phase 15) — see
+ * data/policy.ts's SKILL_SIGNOFF_CRITERIA for the threshold/reasoning. Pure over a
+ * Scorecard alone; this function has no notion of SimMode — callers (see
+ * engine/skillAttempt.ts's buildAttemptRecord) are responsible for only treating the
+ * result as "meets the requirement" for a validation-mode debrief.
+ */
+export function isSkillPassed(card: Scorecard): boolean {
+  if (card.overallPercent == null) return false
+  if (card.overallPercent < SKILL_SIGNOFF_CRITERIA.minOverallPercent) return false
+  if (SKILL_SIGNOFF_CRITERIA.requireNoMissedCategory && card.categories.some((c) => c.status === 'missed')) {
+    return false
+  }
+  return true
 }

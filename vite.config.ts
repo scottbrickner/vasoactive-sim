@@ -3,7 +3,8 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  base: command === 'build' ? '/vasoactive-sim/' : '/',
   plugins: [react(), tailwindcss()],
   test: {
     environment: 'jsdom',
@@ -11,4 +12,4 @@ export default defineConfig({
     setupFiles: ['./vitest.setup.ts'],
     css: true,
   },
-})
+}))

@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { useSimStore } from '../state/store'
-import { scoreSession } from '../engine/scoring'
+import { isSkillPassed, scoreSession, type Scorecard } from '../engine/scoring'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
+import { SKILL_SIGNOFF_CRITERIA } from '../data/policy'
 
 const NOREPI_ORDER_ID = 'order-norepinephrine-agent1'
 const VASOPRESSIN_ORDER_ID = 'order-vasopressin-agent2'
@@ -361,5 +362,43 @@ describe('scoreSession — no activity at all', () => {
     expect(card.overallPercent).toBeNull()
     expect(card.strengths).toEqual([])
     expect(card.opportunities).toEqual([])
+  })
+})
+
+function fixtureCard(overrides: Partial<Scorecard> = {}): Scorecard {
+  return {
+    categories: [{ key: 'adherence', label: 'Order adherence', status: 'met', detail: '' }],
+    overallPercent: 100,
+    strengths: [],
+    opportunities: [],
+    ...overrides,
+  }
+}
+
+describe('isSkillPassed', () => {
+  it('is false when overallPercent is null (nothing was scoreable)', () => {
+    expect(isSkillPassed(fixtureCard({ overallPercent: null }))).toBe(false)
+  })
+
+  it('is true at exactly the threshold with no missed category', () => {
+    expect(isSkillPassed(fixtureCard({ overallPercent: SKILL_SIGNOFF_CRITERIA.minOverallPercent }))).toBe(true)
+  })
+
+  it('is false one point below the threshold', () => {
+    expect(isSkillPassed(fixtureCard({ overallPercent: SKILL_SIGNOFF_CRITERIA.minOverallPercent - 1 }))).toBe(false)
+  })
+
+  it('is false when a category is "missed", even with a high overall percent', () => {
+    // Unreachable via a real scoreSession() call given today's category count/weights,
+    // but the requireNoMissedCategory guard itself needs direct coverage so it's proven
+    // to not be a no-op.
+    const card = fixtureCard({
+      overallPercent: 95,
+      categories: [
+        { key: 'adherence', label: 'Order adherence', status: 'met', detail: '' },
+        { key: 'documentation', label: 'Documentation cadence & placement', status: 'missed', detail: '' },
+      ],
+    })
+    expect(isSkillPassed(card)).toBe(false)
   })
 })
