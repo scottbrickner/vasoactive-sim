@@ -16,11 +16,12 @@
  */
 
 interface MinimalWritable {
-  write(data: string): Promise<void>
+  write(data: string | ArrayBuffer): Promise<void>
   close(): Promise<void>
 }
 interface MinimalFileHandle {
   createWritable(): Promise<MinimalWritable>
+  getFile(): Promise<File>
 }
 export interface MinimalDirectoryHandle {
   name: string
@@ -90,10 +91,33 @@ export async function pickTeamsFolder(): Promise<MinimalDirectoryHandle> {
 export async function writeFileToFolder(
   folderHandle: MinimalDirectoryHandle,
   filename: string,
-  contents: string,
+  contents: string | ArrayBuffer,
 ): Promise<void> {
   const fileHandle = await folderHandle.getFileHandle(filename, { create: true })
   const writable = await fileHandle.createWritable()
   await writable.write(contents)
   await writable.close()
+}
+
+/**
+ * Reads a file from the folder as raw bytes, or returns null if it doesn't exist yet
+ * (first-ever save). Per the File System Access API spec, getFileHandle(name, {create:
+ * false}) rejects with a DOMException named 'NotFoundError' when the file is absent —
+ * that's the only error this treats as "doesn't exist yet"; anything else (e.g.
+ * permission revoked, file locked) is rethrown so callers can distinguish a genuine
+ * missing-file case from a real failure.
+ */
+export async function readFileFromFolder(
+  folderHandle: MinimalDirectoryHandle,
+  filename: string,
+): Promise<ArrayBuffer | null> {
+  let fileHandle: MinimalFileHandle
+  try {
+    fileHandle = await folderHandle.getFileHandle(filename, { create: false })
+  } catch (err) {
+    if ((err as { name?: string } | null)?.name === 'NotFoundError') return null
+    throw err
+  }
+  const file = await fileHandle.getFile()
+  return file.arrayBuffer()
 }
