@@ -2,7 +2,7 @@
  * Skill-attempt record building (Phase 15) — pure, no React/DOM. One completed
  * simulation run's outcome, recorded at every debrief arrival (training and
  * validation alike, so usage can be counted), even though only a validation-mode
- * `passed: true` entry satisfies the "My Skill Status" requirement (see
+ * `passed: true` entry counts as meeting the skill sign-off requirement (see
  * state/skillTrackingStore.ts). Shaped for an eventual Power Automate/Dataverse POST
  * (see sync/telemetry.ts) — not sent automatically unless that env var is set.
  */

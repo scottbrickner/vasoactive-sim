@@ -73,17 +73,6 @@ export function attemptToCSV(record: AttemptRecord): string {
   return rows.join('\n')
 }
 
-/** History export ("My Skill Status" page) — same columns, every attempt's categories concatenated. */
-export function attemptsToCSV(records: AttemptRecord[]): string {
-  const rows = [ATTEMPT_CSV_COLUMNS.join(',')]
-  for (const record of records) {
-    for (const row of attemptRows(record)) {
-      rows.push(ATTEMPT_CSV_COLUMNS.map((k) => csvCell(row[k])).join(','))
-    }
-  }
-  return rows.join('\n')
-}
-
 /** Filenames + contents for both export formats — shared by the download and Teams-folder-save paths. */
 export function attemptFiles(record: AttemptRecord) {
   const base = `vasoactive-skill-attempt-${record.scenarioId}-${slug(record.learnerName)}-${Date.now()}`
@@ -101,8 +90,4 @@ export function exportAttemptJSON(record: AttemptRecord): void {
 export function exportAttemptCSV(record: AttemptRecord): void {
   const { csv } = attemptFiles(record)
   download(csv.name, csv.contents, csv.mime)
-}
-
-export function exportAttemptsHistoryCSV(records: AttemptRecord[]): void {
-  download(`vasoactive-skill-attempts-history-${Date.now()}.csv`, attemptsToCSV(records), 'text/csv')
 }

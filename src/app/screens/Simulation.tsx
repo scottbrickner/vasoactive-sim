@@ -168,7 +168,7 @@ export function Simulation() {
   // Records this run (training or validation) into the skill-tracking store (Phase 15)
   // right before every debrief arrival — a separate store from useSimStore, so a
   // facilitated session's cross-window state broadcast (Phase 10) never overwrites it.
-  // Only a validation-mode pass counts toward the "My Skill Status" requirement; see
+  // Only a validation-mode pass counts as meeting the skill sign-off requirement; see
   // engine/skillAttempt.ts's buildAttemptRecord.
   function recordThisAttempt() {
     const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory })

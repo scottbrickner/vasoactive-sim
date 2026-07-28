@@ -5,12 +5,8 @@
  * lives in src/engine/ and operates on these types; scoring.ts (debrief) is Phase 6.
  */
 
-/**
- * The top-level phases of the learner flow. Mirrors the eventual SimState.phase.
- * 'skillStatus' (Phase 15) is a standalone read-only page, not part of the sim loop
- * itself — reachable from the header at any point outside an active 'sim' run.
- */
-export type Phase = 'intro' | 'sim' | 'debrief' | 'skillStatus'
+/** The top-level phases of the learner flow. Mirrors the eventual SimState.phase. */
+export type Phase = 'intro' | 'sim' | 'debrief'
 
 /**
  * Training mode coaches in real time and lets the learner override an off-order dose

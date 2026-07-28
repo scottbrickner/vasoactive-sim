@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { attemptToCSV, attemptsToCSV, csvCell } from '../sync/skillAttemptExport'
+import { attemptToCSV, csvCell } from '../sync/skillAttemptExport'
 import type { AttemptRecord } from '../engine/skillAttempt'
 
 describe('csvCell', () => {
@@ -62,19 +62,5 @@ describe('attemptToCSV', () => {
     const lines = csv.split('\n')
     expect(lines[1]).toMatch(/^2026-01-01T00:00:00\.000Z,neutropenic-septic-shock,Septic shock,validation,Jane Doe/)
     expect(lines[2]).toMatch(/^2026-01-01T00:00:00\.000Z,neutropenic-septic-shock,Septic shock,validation,Jane Doe/)
-  })
-})
-
-describe('attemptsToCSV', () => {
-  it('concatenates every attempt record\'s category rows under one header', () => {
-    const csv = attemptsToCSV([fixtureRecord({ attemptId: 'a1' }), fixtureRecord({ attemptId: 'a2' })])
-    const lines = csv.split('\n')
-    // 1 header + 2 categories per record * 2 records
-    expect(lines).toHaveLength(5)
-  })
-
-  it('returns just the header for an empty history', () => {
-    const csv = attemptsToCSV([])
-    expect(csv.split('\n')).toHaveLength(1)
   })
 })

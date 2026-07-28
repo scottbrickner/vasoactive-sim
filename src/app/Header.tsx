@@ -26,15 +26,13 @@ function Stat({ label, value, unit, emphasis }: StatProps) {
 /** Persistent branded header: USC wordmark + live sim clock / current MAP / target readout. */
 export function Header() {
   const phase = useSimStore((s) => s.phase)
-  const setPhase = useSimStore((s) => s.setPhase)
   const clockMinutes = useSimStore((s) => s.clockMinutes)
   const map = useSimStore((s) => s.vitals.map)
   const orders = useSimStore((s) => s.orders)
   const targetMap = orders.find((o) => o.sequence === 1)?.target.value ?? null
 
-  // Live vitals are meaningless noise on the intro screen (nothing has started yet) or
-  // the standalone "My Skill Status" page (Phase 15) — blank both there.
-  const noLiveReadout = phase === 'intro' || phase === 'skillStatus'
+  // Live vitals are meaningless noise on the intro screen — nothing has started yet.
+  const noLiveReadout = phase === 'intro'
 
   const header: HeaderReadout = {
     clockMinutes,
@@ -60,15 +58,6 @@ export function Header() {
             <p className="text-xs text-white/70">USC Norris Cancer Hospital · Oncology ICU</p>
           </div>
         </div>
-        {phase !== 'sim' && phase !== 'skillStatus' && (
-          <button
-            type="button"
-            onClick={() => setPhase('skillStatus')}
-            className="text-sm font-semibold text-white/90 underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gold"
-          >
-            My Skill Status
-          </button>
-        )}
         <HeaderStats header={header} />
       </div>
     </header>
