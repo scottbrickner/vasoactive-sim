@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Local secrets (e.g. VITE_POWER_AUTOMATE_URL) — never commit these
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
