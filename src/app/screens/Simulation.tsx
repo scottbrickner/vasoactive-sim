@@ -291,18 +291,26 @@ export function Simulation() {
         </p>
       </div>
 
+      {/*
+        Phase 17: the Alaris ganged pump array (central module + up to 4 channel
+        modules) needs real width to avoid horizontal scrolling — confirmed via a
+        3-channel scenario that its natural width (~1050px) badly overflows a
+        two-column grid's half-width cell (~540px). Render it full-width, same as
+        PhilipsMonitor above, rather than as the first item in the left column.
+      */}
+      <AlarisPump
+        channels={channels}
+        clockMinutes={clockMinutes}
+        disabled={locked}
+        onRequestProgram={(orderId, dose) => setPendingAction({ kind: 'initiate', orderId, dose })}
+        onTitrate={(orderId, dose) => submitDose(orderId, dose)}
+        onPause={pauseInfusion}
+        onRestart={restartInfusion}
+        onDiscontinue={discontinueInfusion}
+      />
+
       <div className="grid gap-gutter md:grid-cols-2">
         <div className="flex flex-col gap-gutter">
-          <AlarisPump
-            channels={channels}
-            clockMinutes={clockMinutes}
-            disabled={locked}
-            onRequestProgram={(orderId, dose) => setPendingAction({ kind: 'initiate', orderId, dose })}
-            onTitrate={(orderId, dose) => submitDose(orderId, dose)}
-            onPause={pauseInfusion}
-            onRestart={restartInfusion}
-            onDiscontinue={discontinueInfusion}
-          />
           <InfusionsPanel infusions={infusions} />
           {scenario.enableBlockOfCharting && (
             <BlockOfChartingControl
@@ -334,6 +342,9 @@ export function Simulation() {
             priorVitals={scenario.priorVitals}
             startingVitals={scenario.startingVitals}
             chartedEntries={chartedEntries}
+            orders={orders}
+            infusions={infusions}
+            log={log}
             canChartNow={!locked}
             onChartNow={chartVitals}
           />

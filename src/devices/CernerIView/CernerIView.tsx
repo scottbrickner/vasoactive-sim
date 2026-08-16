@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { cerner } from '../../design/deviceTokens'
 import { Button, InlineConfirm } from '../../design/primitives'
+import { getDrug } from '../../data/formulary'
+import { rateAtMinute } from '../../engine/infusionRateHistory'
 import { formatClock, formatRelativeMinutes } from '../../lib/time'
-import type { PriorVitalsPoint, VitalSigns } from '../../state/types'
+import type { Infusion, LogEntry, Order, PriorVitalsPoint, VitalSigns } from '../../state/types'
 
 export interface ChartedVitalsEntry {
   minute: number
@@ -17,6 +19,10 @@ export interface CernerIViewProps {
   priorVitals: PriorVitalsPoint[]
   startingVitals: VitalSigns
   chartedEntries: ChartedVitalsEntry[]
+  /** Phase 17: drives the new Continuous Infusions rate-history section, below. */
+  orders: Order[]
+  infusions: Infusion[]
+  log: LogEntry[]
   onChartNow: () => void
   canChartNow: boolean
 }
@@ -38,26 +44,49 @@ const ROWS: { label: string; read: (v: VitalSigns) => string }[] = [
  * safe to show in full — that's context a nurse coming onto shift always sees — but
  * everything from sim start on is charted only when the learner actually charts it,
  * timestamped to the real sim clock, never a template of expected checkpoints.
+ *
+ * Phase 17: added a "Continuous Infusions" rate-history section (above the vitals rows),
+ * matching the real Cerner MAR's own "Continuous Infusions" grid — one row per order
+ * that's ever been infused, with a cell per column showing the rate in effect (via
+ * engine/infusionRateHistory.ts) and a distinct "Rate Change X.X" treatment on the exact
+ * column where a real logged initiate/titrate landed. Historical (pre-sim-start)
+ * columns show "—" for this section — there's no real infusion-rate concept before the
+ * scenario began, unlike vitals (which DO have real prior-shift data via priorVitals).
  */
 export function CernerIView({
   priorVitals,
   startingVitals,
   chartedEntries,
+  orders,
+  infusions,
+  log,
   onChartNow,
   canChartNow,
 }: CernerIViewProps) {
   const [confirmTick, setConfirmTick] = useState<number | null>(null)
   const historicalColumns = [...priorVitals]
     .sort((a, b) => b.minutesBeforeStart - a.minutesBeforeStart)
-    .map((p) => ({ label: formatRelativeMinutes(p.minutesBeforeStart), vitals: p.vitals }))
-  const startColumn = { label: formatClock(0), vitals: startingVitals }
+    .map((p) => ({ label: formatRelativeMinutes(p.minutesBeforeStart), vitals: p.vitals, minute: null as number | null }))
+  const startColumn = { label: formatClock(0), vitals: startingVitals, minute: 0 }
   const liveColumns = [...chartedEntries]
     .sort((a, b) => a.minute - b.minute)
     .map((e) => {
       const tags = [e.retrospective && 'backdated', e.guided && 'guided'].filter(Boolean).join(', ')
-      return { label: tags ? `${formatClock(e.minute)} (${tags})` : formatClock(e.minute), vitals: e.vitals }
+      return { label: tags ? `${formatClock(e.minute)} (${tags})` : formatClock(e.minute), vitals: e.vitals, minute: e.minute }
     })
   const columns = [...historicalColumns, startColumn, ...liveColumns]
+
+  // Only orders that have ever been infused (a real dose/discontinue entry, or a
+  // scenario-pre-seeded already-infusing infusion) get a rate row — an order that's
+  // still locked/never activated has nothing to show here yet.
+  const infusedOrders = orders.filter(
+    (o) =>
+      log.some((e) => e.type === 'action' && e.orderId === o.id && (e.doseAction != null || e.lifecycleAction === 'discontinue')) ||
+      infusions.some((i) => i.orderId === o.id && i.status !== 'hanging'),
+  )
+
+  let rowIndex = 0
+  const stripe = () => (rowIndex++ % 2 === 1 ? cerner.surfaceAlt : cerner.surface)
 
   return (
     <div className="overflow-hidden rounded-md border" style={{ borderColor: cerner.gridLine }}>
@@ -89,8 +118,65 @@ export function CernerIView({
             </tr>
           </thead>
           <tbody>
+            {infusedOrders.length > 0 && (
+              <tr>
+                <th
+                  colSpan={1 + columns.length}
+                  className="px-3 py-1.5 text-left text-xs font-semibold tracking-wide uppercase"
+                  style={{ backgroundColor: cerner.continuousInfusionsHeader, color: cerner.chromeText }}
+                >
+                  Continuous Infusions
+                </th>
+              </tr>
+            )}
+            {infusedOrders.map((order) => {
+              const drug = getDrug(order.drugId)
+              return (
+                <tr key={order.id} className="border-b last:border-0" style={{ borderColor: cerner.gridLine, backgroundColor: stripe() }}>
+                  <td className="px-3 py-2 font-medium whitespace-nowrap">{drug.name}</td>
+                  {columns.map((c, i) => {
+                    if (c.minute == null) {
+                      return (
+                        <td key={i} className="px-3 py-2 whitespace-nowrap" style={{ color: cerner.muted }}>
+                          —
+                        </td>
+                      )
+                    }
+                    const entry = rateAtMinute(order.id, log, infusions, c.minute)
+                    if (entry.discontinued) {
+                      return (
+                        <td key={i} className="px-3 py-2 whitespace-nowrap" style={{ color: cerner.stopped }}>
+                          D/C
+                        </td>
+                      )
+                    }
+                    if (entry.rate == null) {
+                      return (
+                        <td key={i} className="px-3 py-2 whitespace-nowrap" style={{ color: cerner.muted }}>
+                          —
+                        </td>
+                      )
+                    }
+                    return (
+                      <td
+                        key={i}
+                        className="px-3 py-2 whitespace-nowrap"
+                        style={
+                          entry.isRateChangeAtMinute
+                            ? { backgroundColor: cerner.rateChangeBg, color: cerner.rateChangeText, fontWeight: 700 }
+                            : undefined
+                        }
+                      >
+                        {entry.isRateChangeAtMinute ? 'Rate Change ' : ''}
+                        {entry.rate} {drug.unit}
+                      </td>
+                    )
+                  })}
+                </tr>
+              )
+            })}
             {ROWS.map((row) => (
-              <tr key={row.label} className="border-b last:border-0" style={{ borderColor: cerner.gridLine }}>
+              <tr key={row.label} className="border-b last:border-0" style={{ borderColor: cerner.gridLine, backgroundColor: stripe() }}>
                 <td className="px-3 py-2 font-medium whitespace-nowrap">{row.label}</td>
                 {columns.map((c, i) => (
                   <td key={i} className="px-3 py-2 whitespace-nowrap">

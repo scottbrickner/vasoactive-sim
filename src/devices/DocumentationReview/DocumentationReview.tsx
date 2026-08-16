@@ -1,4 +1,5 @@
 import { cerner } from '../../design/deviceTokens'
+import { DeviceStatusBadge } from '../shared'
 import { formatClock } from '../../lib/time'
 import type { LogEntry } from '../../state/types'
 
@@ -44,8 +45,12 @@ export function DocumentationReview({ log }: DocumentationReviewProps) {
                 </td>
               </tr>
             ) : (
-              sorted.map((entry) => (
-                <tr key={entry.id} className="border-b last:border-0" style={{ borderColor: cerner.gridLine }}>
+              sorted.map((entry, i) => (
+                <tr
+                  key={entry.id}
+                  className="border-b last:border-0"
+                  style={{ borderColor: cerner.gridLine, backgroundColor: i % 2 === 1 ? cerner.surfaceAlt : cerner.surface }}
+                >
                   <td className="px-3 py-2 font-mono whitespace-nowrap">{formatClock(entry.minute)}</td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     <TypeBadge type={entry.type} />
@@ -65,14 +70,10 @@ export function DocumentationReview({ log }: DocumentationReviewProps) {
 function TypeBadge({ type }: { type: LogEntry['type'] }) {
   const isDoc = type === 'documentation'
   return (
-    <span
-      className="rounded px-2 py-0.5 text-xs font-semibold"
-      style={{
-        backgroundColor: isDoc ? cerner.completeBg : cerner.pendingBg,
-        color: isDoc ? cerner.complete : cerner.pending,
-      }}
-    >
-      {isDoc ? 'Documentation' : 'Action'}
-    </span>
+    <DeviceStatusBadge
+      label={isDoc ? 'Documentation' : 'Action'}
+      backgroundColor={isDoc ? cerner.completeBg : cerner.pendingBg}
+      color={isDoc ? cerner.complete : cerner.pending}
+    />
   )
 }

@@ -1,5 +1,6 @@
 import { cn } from '../../design/cn'
 import { cerner } from '../../design/deviceTokens'
+import { DeviceStatusBadge } from '../shared'
 import { getDrug } from '../../data/formulary'
 import type { Infusion, InfusionStatus } from '../../state/types'
 
@@ -36,7 +37,7 @@ export function InfusionsPanel({ infusions }: InfusionsPanelProps) {
             <li
               key={infusion.id}
               className={cn('flex items-center justify-between px-3 py-2 text-sm', i < infusions.length - 1 && 'border-b')}
-              style={{ color: cerner.ink, borderColor: cerner.gridLine }}
+              style={{ color: cerner.ink, borderColor: cerner.gridLine, backgroundColor: i % 2 === 1 ? cerner.surfaceAlt : cerner.surface }}
             >
               <div>
                 <div className="font-medium">{drug.name}</div>
@@ -44,12 +45,7 @@ export function InfusionsPanel({ infusions }: InfusionsPanelProps) {
                   Channel {infusion.channel} · {infusion.rate} {drug.unit}
                 </div>
               </div>
-              <span
-                className="rounded-full px-2 py-0.5 text-xs font-semibold text-white"
-                style={{ backgroundColor: STATUS_COLOR[infusion.status] }}
-              >
-                {STATUS_LABEL[infusion.status]}
-              </span>
+              <DeviceStatusBadge label={STATUS_LABEL[infusion.status]} backgroundColor={STATUS_COLOR[infusion.status]} color="#ffffff" />
             </li>
           )
         })}

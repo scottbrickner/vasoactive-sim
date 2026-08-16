@@ -1,5 +1,5 @@
-import type { ReactNode } from 'react'
 import { cerner } from '../../design/deviceTokens'
+import { DeviceStatusBadge } from '../shared'
 import { getDrug } from '../../data/formulary'
 import { buildCadenceStatusForOrders, type CadenceCheck } from '../../engine/documentation'
 import { formatClock } from '../../lib/time'
@@ -25,15 +25,10 @@ function cadenceLabel(check: CadenceCheck): string {
   }
 }
 
-function StatusBadge({ met, children }: { met: boolean; children: ReactNode }) {
-  return (
-    <span
-      className="rounded px-2 py-0.5 text-xs font-semibold whitespace-nowrap"
-      style={{ backgroundColor: met ? cerner.completeBg : cerner.pendingBg, color: met ? cerner.complete : cerner.pending }}
-    >
-      {children}
-    </span>
-  )
+/** Phase 17: thin wrapper over the shared DeviceStatusBadge, preserving this
+ *  component's own met/not-met -> complete/pending color mapping exactly as before. */
+function CadenceBadge({ met, label }: { met: boolean; label: string }) {
+  return <DeviceStatusBadge label={label} backgroundColor={met ? cerner.completeBg : cerner.pendingBg} color={met ? cerner.complete : cerner.pending} />
 }
 
 /**
@@ -80,10 +75,8 @@ export function CernerChartingStatus({ orders, infusions, log, verificationFlags
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-medium">{drug.name}</span>
                   <div className="flex items-center gap-2">
-                    {verified != null && <StatusBadge met={verified}>{verified ? 'Verified' : 'Not yet verified'}</StatusBadge>}
-                    <StatusBadge met={outstanding.length === 0}>
-                      {met} of {status.checks.length} charted
-                    </StatusBadge>
+                    {verified != null && <CadenceBadge met={verified} label={verified ? 'Verified' : 'Not yet verified'} />}
+                    <CadenceBadge met={outstanding.length === 0} label={`${met} of ${status.checks.length} charted`} />
                   </div>
                 </div>
                 {outstanding.length > 0 ? (

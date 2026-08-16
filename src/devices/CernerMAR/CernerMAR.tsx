@@ -1,5 +1,6 @@
 import { cerner } from '../../design/deviceTokens'
 import { Button } from '../../design/primitives'
+import { DeviceStatusBadge } from '../shared'
 import { getDrug } from '../../data/formulary'
 import type { Infusion } from '../../state/types'
 
@@ -11,7 +12,15 @@ export interface CernerMARProps {
   disabled?: boolean
 }
 
-/** Faithful (not stylized) replica of the Cerner MAR — Begin Bag + initial rate (CP 4-156). */
+/**
+ * Faithful (not stylized) replica of the Cerner MAR — Begin Bag + initial rate (CP 4-156).
+ * Phase 17: same props/columns/logic, reskinned only — alternating row shading and the
+ * shared DeviceStatusBadge, matching the rest of the Cerner surfaces (CernerIView,
+ * InfusionsPanel, CernerChartingStatus). Rate-CHANGE history deliberately stays out of
+ * this table (see CernerIView.tsx's Continuous Infusions section for that) — MAR here
+ * is still a single-snapshot table per CLAUDE.md's placement rule ("Begin Bag + initial
+ * rate in MAR; subsequent titrations in iView").
+ */
 export function CernerMAR({ infusions, onCompleteBeginBag, disabled }: CernerMARProps) {
   return (
     <div className="overflow-hidden rounded-md border" style={{ borderColor: cerner.gridLine }}>
@@ -37,10 +46,14 @@ export function CernerMAR({ infusions, onCompleteBeginBag, disabled }: CernerMAR
             </tr>
           </thead>
           <tbody>
-            {infusions.map((infusion) => {
+            {infusions.map((infusion, i) => {
               const drug = getDrug(infusion.drugId)
               return (
-                <tr key={infusion.id} className="border-b last:border-0" style={{ borderColor: cerner.gridLine }}>
+                <tr
+                  key={infusion.id}
+                  className="border-b last:border-0"
+                  style={{ borderColor: cerner.gridLine, backgroundColor: i % 2 === 1 ? cerner.surfaceAlt : cerner.surface }}
+                >
                   <td className="px-3 py-2">
                     <div className="font-medium">{drug.name}</div>
                     <div className="text-xs" style={{ color: cerner.muted }}>
@@ -49,10 +62,10 @@ export function CernerMAR({ infusions, onCompleteBeginBag, disabled }: CernerMAR
                   </td>
                   <td className="px-3 py-2">
                     {infusion.beginBagCompleted ? (
-                      <BeginBagBadge complete />
+                      <DeviceStatusBadge label="Completed" backgroundColor={cerner.completeBg} color={cerner.complete} />
                     ) : (
                       <div className="flex items-center gap-2">
-                        <BeginBagBadge complete={false} />
+                        <DeviceStatusBadge label="Not Completed" backgroundColor={cerner.pendingBg} color={cerner.pending} />
                         <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onCompleteBeginBag(infusion.id)}>
                           Begin Bag
                         </Button>
@@ -71,19 +84,5 @@ export function CernerMAR({ infusions, onCompleteBeginBag, disabled }: CernerMAR
         </table>
       </div>
     </div>
-  )
-}
-
-function BeginBagBadge({ complete }: { complete: boolean }) {
-  return (
-    <span
-      className="rounded px-2 py-0.5 text-xs font-semibold whitespace-nowrap"
-      style={{
-        backgroundColor: complete ? cerner.completeBg : cerner.pendingBg,
-        color: complete ? cerner.complete : cerner.pending,
-      }}
-    >
-      {complete ? 'Completed' : 'Not Completed'}
-    </span>
   )
 }

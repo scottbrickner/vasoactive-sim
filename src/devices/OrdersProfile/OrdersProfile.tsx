@@ -37,10 +37,14 @@ export function OrdersProfile({ orders }: OrdersProfileProps) {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((order) => {
+            {sorted.map((order, i) => {
               const drug = getDrug(order.drugId)
               return (
-                <tr key={order.id} className="border-b last:border-0" style={{ borderColor: cerner.gridLine }}>
+                <tr
+                  key={order.id}
+                  className="border-b last:border-0"
+                  style={{ borderColor: cerner.gridLine, backgroundColor: i % 2 === 1 ? cerner.surfaceAlt : cerner.surface }}
+                >
                   <td className="px-3 py-2 font-medium">#{order.sequence}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{drug.name}</td>
                   <td className="px-3 py-2 tabular-nums whitespace-nowrap">
