@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { deriveActivationText } from '../engine/activation'
 import { computeMultiStepDoses, evaluateTitration, meetsTarget } from '../engine/titrationEngine'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
-import type { Order } from '../state/types'
+import type { Order, VitalSigns } from '../state/types'
 
 const norepiOrder = DEFAULT_SCENARIO.orders.find((o) => o.drugId === 'norepinephrine')!
 // `activatesWhen` isn't baked into the raw scenario data anymore — store.ts derives it at
@@ -19,6 +19,13 @@ const vasopressinOrder: Order = {
 const belowTargetMap = 57 // scenario baseline; target is MAP >= 65
 const atTargetMap = 65
 
+/** A full VitalSigns fixture with just `map` overridden — every other field inert for these MAP-target tests. */
+function vitalsWithMap(map: number): VitalSigns {
+  return { ...DEFAULT_SCENARIO.startingVitals, map }
+}
+const belowTargetVitals = vitalsWithMap(belowTargetMap)
+const atTargetVitals = vitalsWithMap(atTargetMap)
+
 function base(overrides: Partial<Parameters<typeof evaluateTitration>[0]> = {}) {
   return evaluateTitration({
     action: 'titrate',
@@ -27,7 +34,7 @@ function base(overrides: Partial<Parameters<typeof evaluateTitration>[0]> = {}) 
     proposedDose: 1,
     currentMinute: 3,
     lastActionMinute: 0,
-    currentMap: belowTargetMap,
+    vitals: belowTargetVitals,
     priorAgentActivationMet: true,
     priorAgentsWeaned: true,
     ...overrides,
@@ -43,7 +50,7 @@ describe('titrationEngine — initiation', () => {
       proposedDose: 0.5,
       currentMinute: 0,
       lastActionMinute: null,
-      currentMap: belowTargetMap,
+      vitals: belowTargetVitals,
       priorAgentActivationMet: true,
       priorAgentsWeaned: true,
     })
@@ -58,7 +65,7 @@ describe('titrationEngine — initiation', () => {
       proposedDose: 1,
       currentMinute: 0,
       lastActionMinute: null,
-      currentMap: belowTargetMap,
+      vitals: belowTargetVitals,
       priorAgentActivationMet: true,
       priorAgentsWeaned: true,
     })
@@ -107,7 +114,7 @@ describe('titrationEngine — titration mechanics', () => {
       proposedDose: 0.03,
       currentMinute: 30,
       lastActionMinute: 0,
-      currentMap: belowTargetMap,
+      vitals: belowTargetVitals,
       priorAgentActivationMet: true,
       priorAgentsWeaned: true,
     })
@@ -117,7 +124,7 @@ describe('titrationEngine — titration mechanics', () => {
 
 describe('titrationEngine — target', () => {
   it('off-order for further up-titration once the target is already met', () => {
-    const result = base({ currentMap: atTargetMap })
+    const result = base({ vitals: atTargetVitals })
     expect(result.status).toBe('off-order')
     expect(result.reasons.some((r) => /target already met/i.test(r))).toBe(true)
     expect(result.violations.targetAlreadyMet).toBe(true)
@@ -126,14 +133,14 @@ describe('titrationEngine — target', () => {
 
 describe('titrationEngine — max dose and provider notification', () => {
   it('needs-provider when the proposed dose exceeds the order max and target is unmet', () => {
-    const result = base({ currentDose: 29.5, proposedDose: 30.5, currentMap: belowTargetMap })
+    const result = base({ currentDose: 29.5, proposedDose: 30.5, vitals: belowTargetVitals })
     expect(result.status).toBe('needs-provider')
     expect(result.reasons[0]).toMatch(/exceeds the ordered maximum/i)
     expect(result.violations).toEqual({ exceedsOrderMax: true })
   })
 
   it('off-order (not needs-provider) when the proposed dose exceeds the order max but target is already met', () => {
-    const result = base({ currentDose: 29.5, proposedDose: 30.5, currentMap: atTargetMap })
+    const result = base({ currentDose: 29.5, proposedDose: 30.5, vitals: atTargetVitals })
     expect(result.status).toBe('off-order')
     expect(result.violations).toEqual({ exceedsOrderMax: true })
   })
@@ -148,7 +155,7 @@ describe('titrationEngine — multi-agent sequence', () => {
       proposedDose: 0.02,
       currentMinute: 0,
       lastActionMinute: null,
-      currentMap: belowTargetMap,
+      vitals: belowTargetVitals,
       priorAgentActivationMet: false,
       priorAgentsWeaned: true,
     })
@@ -165,7 +172,7 @@ describe('titrationEngine — multi-agent sequence', () => {
       proposedDose: 0.02,
       currentMinute: 0,
       lastActionMinute: null,
-      currentMap: belowTargetMap,
+      vitals: belowTargetVitals,
       priorAgentActivationMet: true,
       priorAgentsWeaned: true,
     })
@@ -193,7 +200,7 @@ describe('titrationEngine — multi-agent sequence', () => {
       proposedDose: 0.02,
       currentMinute: 30,
       lastActionMinute: 0,
-      currentMap: atTargetMap,
+      vitals: atTargetVitals,
       priorAgentActivationMet: false,
       priorAgentsWeaned: true,
     })
@@ -264,9 +271,8 @@ describe('titrationEngine — computeMultiStepDoses', () => {
     expect(plan.wasSnappedDown).toBe(true)
   })
 
-  it('returns an empty plan when the target is at or below the current dose', () => {
+  it('returns an empty plan when the target equals the current dose (a no-op, either direction)', () => {
     expect(computeMultiStepDoses(9, 0.5, 30, 9).doses).toEqual([])
-    expect(computeMultiStepDoses(9, 0.5, 30, 5).doses).toEqual([])
   })
 
   it('clamps to maxAllowedDose when the target exceeds it', () => {
@@ -285,5 +291,39 @@ describe('titrationEngine — computeMultiStepDoses', () => {
     const plan = computeMultiStepDoses(0.02, 0.01, 0.04, 0.04)
     expect(plan.doses).toEqual([0.03, 0.04])
     expect(plan.wasSnappedDown).toBe(false)
+  })
+})
+
+// Bidirectional since a user-reported bug: this mechanic was originally up-only and
+// silently couldn't help a learner weaning a pressor DOWN (weaningSupport scenario).
+// The downward branch mirrors the upward one above exactly — same fixtures, negated.
+describe('titrationEngine — computeMultiStepDoses (downward/weaning plans)', () => {
+  it('produces a clean-increment down-plan toward the target', () => {
+    const plan = computeMultiStepDoses(10, 0.5, 30, 8.5)
+    expect(plan.doses).toEqual([9.5, 9, 8.5])
+    expect(plan.wasSnappedDown).toBe(false)
+  })
+
+  it('snaps a non-aligned downward target to the nearest reachable dose', () => {
+    const plan = computeMultiStepDoses(10, 0.5, 30, 8.3)
+    expect(plan.doses).toEqual([9.5, 9, 8.5])
+    expect(plan.wasSnappedDown).toBe(true)
+  })
+
+  it('floors the down-plan at minAllowedDose rather than continuing toward a target below it', () => {
+    const plan = computeMultiStepDoses(1, 0.5, 30, 0, 0.5)
+    expect(plan.doses).toEqual([0.5])
+    expect(plan.wasSnappedDown).toBe(true)
+  })
+
+  it('defaults minAllowedDose to 0 when omitted (a non-weaning order can be planned all the way down)', () => {
+    const plan = computeMultiStepDoses(1, 0.5, 30, 0)
+    expect(plan.doses).toEqual([0.5, 0])
+    expect(plan.wasSnappedDown).toBe(false)
+  })
+
+  it('a target already at or above the current dose is the upward/no-op case, not a downward plan', () => {
+    expect(computeMultiStepDoses(9, 0.5, 30, 9).doses).toEqual([])
+    expect(computeMultiStepDoses(9, 0.5, 30, 10).doses).toEqual([9.5, 10])
   })
 })

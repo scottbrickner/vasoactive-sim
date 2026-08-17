@@ -31,21 +31,32 @@ export interface ProctorRecord {
   recordedAt: string
 }
 
-/** Placeholder header readout. Real values will be driven by the physiology engine (Phase 4). */
+/**
+ * Header readout — driven by the physiology engine. Phase 19b generalized this from
+ * named MAP-only `currentMap`/`targetMap` fields to metric-agnostic formatted strings
+ * (via engine/orderText.ts's formatTargetClause and titrationEngine.ts's
+ * resolveTargetValue), since Header keeps its existing precedent of headlining only the
+ * sequence-1 order — and that order can now target MAP, HR, RASS, or painScore.
+ */
 export interface HeaderReadout {
   /** Elapsed simulation time, in minutes. */
   clockMinutes: number
-  /** Current mean arterial pressure (mmHg), or null before the sim starts. */
-  currentMap: number | null
-  /** Target MAP for the scenario (mmHg), or null before a scenario has been picked (intro phase). */
-  targetMap: number | null
+  /** e.g. "MAP 72 mmHg" — the sequence-1 order's current target-metric value, or null before the sim starts. */
+  currentValueLabel: string | null
+  /** e.g. "MAP >= 65 mmHg" — the sequence-1 order's target clause, or null before a scenario has been picked (intro phase). */
+  targetLabel: string | null
 }
 
 // ---------------------------------------------------------------------------
 // Clinical types (Phase 2)
 // ---------------------------------------------------------------------------
 
-/** The Attachment B vasoactive/inotrope subset modeled in this simulator. */
+/**
+ * The Attachment B subset modeled in this simulator: the original vasoactive/inotrope
+ * set, plus Phase 19e's non-vasoactive additions (fentanyl for pain, dexmedetomidine for
+ * sedation/RASS, diltiazem for rate control) — CP4-156 itself governs IV titration
+ * generally, not vasoactives specifically (see docs/CLINICAL_SPEC.md).
+ */
 export type DrugId =
   | 'norepinephrine'
   | 'epinephrine'
@@ -54,13 +65,16 @@ export type DrugId =
   | 'dobutamine'
   | 'milrinone'
   | 'vasopressin'
+  | 'fentanyl'
+  | 'dexmedetomidine'
+  | 'diltiazem'
 
 /** Dose units present in the modeled formulary subset. */
-export type DoseUnit = 'mcg/min' | 'mcg/kg/min' | 'units/min'
+export type DoseUnit = 'mcg/min' | 'mcg/kg/min' | 'units/min' | 'mcg/hr' | 'mcg/kg/hr' | 'mg/hr'
 
 export interface Concentration {
   amount: number
-  amountUnit: 'mg' | 'units'
+  amountUnit: 'mg' | 'units' | 'mcg'
   volumeMl: number
 }
 
@@ -93,10 +107,12 @@ export interface DrugDefinition {
 
 /** The quantifiable condition that governs titration direction (CP 4-156 §Policy). */
 export interface TitrationTarget {
-  metric: 'MAP'
-  comparator: '>='
+  metric: 'MAP' | 'HR' | 'RASS' | 'painScore'
+  comparator: '>=' | '<=' | 'between'
   value: number
-  unit: 'mmHg'
+  /** Only meaningful when comparator is 'between' — the upper bound (value is the lower bound). */
+  valueHigh?: number
+  unit: 'mmHg' | 'bpm' | 'score'
 }
 
 /**
@@ -206,6 +222,13 @@ export type DecisionPointTrigger =
   | { kind: 'weanEligible' }
   /** Fires after the first applied TITRATE (never an initiate) on this specific order — scoped by orderId, not global, so authoring one doesn't risk firing on every unrelated order's very first titration. */
   | { kind: 'postTitrate'; orderId: string }
+  /**
+   * Phase 19c: fires when a dose ATTEMPT on this specific order — initiate or titrate —
+   * is refused outright (Guardrails hard limit, or a needs-provider outcome), in place of
+   * the routine hard-stop toast (see state/store.ts's submitDose). Distinct from
+   * `postTitrate`: this reacts to a blocked attempt, not a successfully applied one.
+   */
+  | { kind: 'escalationAttempt'; orderId: string }
 
 export interface DecisionPoint {
   id: string
@@ -252,6 +275,10 @@ export interface VitalSigns {
   map: number
   spo2: number
   rhythm: string
+  /** Richmond Agitation-Sedation Scale, -5 (unarousable) to +4 (combative) — the dexmedetomidine titration target. */
+  rass: number
+  /** Self-reported/observed pain score, 0-10 — the fentanyl titration target. */
+  painScore: number
 }
 
 export type DocumentationLocation = 'MAR' | 'iView'
@@ -342,6 +369,14 @@ export interface LogEntry {
   decisionOptionId?: string
   /** Phase 18: the derived tone for that pick — see DecisionTone's doc for how it's derived. */
   decisionTone?: DecisionTone
+  /**
+   * Phase 19d: the independent (two-nurse) double-check's second nurse identity —
+   * present only on an initiate entry for a drug where MEDICATION_VERIFICATION marks
+   * `independentDoubleCheckRequired: true` (e.g. fentanyl). Absent for every other entry.
+   */
+  secondCheckName?: string
+  /** Phase 19d: the second nurse's role, paired with secondCheckName above. */
+  secondCheckRole?: string
 }
 
 /**
@@ -385,6 +420,10 @@ export interface ResponseModelEntry {
   maxHrContribution?: number
   /** SpO2 change (%) at max dose — typically small and positive (perfusion/oxygenation improving alongside MAP). Omit for no SpO2 effect. */
   maxSpo2Contribution?: number
+  /** RASS change at max dose — typically NEGATIVE (deeper sedation). Omit for no RASS effect. */
+  maxRassContribution?: number
+  /** Pain-score change at max dose — typically NEGATIVE (less pain). Omit for no pain-score effect. */
+  maxPainScoreContribution?: number
 }
 
 /** A complete case: patient, starting state, and the titratable order(s) that govern it. */
@@ -436,6 +475,13 @@ export interface SimState {
   log: LogEntry[]
   /** BCMA/I-TRACE verification completion, keyed by the action's LogEntry id. */
   verificationFlags: Record<string, boolean>
+  /**
+   * Phase 19d: independent (two-nurse) double-check completion for high-alert drugs
+   * (e.g. fentanyl — see data/policy.ts's MEDICATION_VERIFICATION), keyed by the same
+   * action's LogEntry id — mirrors verificationFlags exactly. Only ever set for an
+   * initiate entry on a drug requiring the check; absent/false otherwise.
+   */
+  independentCheckFlags: Record<string, boolean>
   /** Order-adherence flags, keyed by the action's LogEntry id. */
   adherenceFlags: Record<string, boolean>
   /**
@@ -445,7 +491,7 @@ export interface SimState {
    * the "clean" pre-jitter value — periodicVariability layers on top afterward, same as
    * it always has for HR.
    */
-  lastPhysiologyUpdate: { minute: number; map: number; hr: number; spo2: number } | null
+  lastPhysiologyUpdate: { minute: number; map: number; hr: number; spo2: number; rass: number; painScore: number } | null
   /** Cumulative mmHg MAP has dropped below baseline from untreated time — see ScenarioConfig.deterioration. Monotonically grows toward `maxDrop` while untreated, frozen otherwise. */
   deteriorationOffset: number
   /** The in-progress Block of Charting episode, if any (CP 4-156's emergent pathway). */

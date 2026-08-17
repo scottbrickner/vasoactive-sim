@@ -6,7 +6,7 @@
  * fields, so the display text can't drift from what the engine actually enforces.
  */
 import { deriveActivationText } from './activation'
-import type { DrugDefinition, Order } from '../state/types'
+import type { DrugDefinition, Order, TitrationTarget } from '../state/types'
 
 /**
  * "q3-5 min" or "q30 min" — moved here from OrdersProfile.tsx (Phase 18) so the grid
@@ -16,10 +16,40 @@ export function formatInterval(interval: Order['interval']): string {
   return interval.maxMinutes ? `q${interval.minMinutes}-${interval.maxMinutes} min` : `q${interval.minMinutes} min`
 }
 
+/**
+ * "MAP >= 65 mmHg" / "HR between 60-100 bpm" — the one shared target-clause renderer for
+ * every comparator (Phase 19b consolidation of what were previously 3+ separate ad hoc
+ * hand-rolled interpolations across orderText/activation/decisionPoints/titrationEngine,
+ * a real drift risk once 'between'/'<=' targets existed). '>='/'<=' render the comparator
+ * symbol as-is; 'between' spells out the range instead (there's no single symbol for it).
+ */
+export function formatTargetClause(target: TitrationTarget): string {
+  if (target.comparator === 'between') {
+    return `${target.metric} between ${target.value}-${target.valueHigh} ${target.unit}`
+  }
+  return `${target.metric} ${target.comparator} ${target.value} ${target.unit}`
+}
+
+/**
+ * "MAP still < 65 mmHg" / "HR still outside 60-100 bpm" — the "target not yet met" gap-
+ * text counterpart to formatTargetClause, shared by activation.ts's deriveActivationText,
+ * decisionPoints.ts's buildAutoEarlyNotificationDecisionPoint, and titrationEngine.ts's
+ * needs-provider reason string.
+ */
+export function formatTargetGapText(target: TitrationTarget): string {
+  switch (target.comparator) {
+    case '>=':
+      return `${target.metric} still < ${target.value} ${target.unit}`
+    case '<=':
+      return `${target.metric} still > ${target.value} ${target.unit}`
+    case 'between':
+      return `${target.metric} still outside ${target.value}-${target.valueHigh} ${target.unit}`
+  }
+}
+
 /** e.g. "Start at 0.5 mcg/min IV, titrate 0.5 mcg/min q3-5 min up to 30 mcg/min. Target MAP >= 65 mmHg." */
 export function deriveFullOrderText(order: Order, drug: DrugDefinition): string {
-  const { target } = order
-  return `Start at ${order.startDose} ${drug.unit} IV, titrate ${order.increment} ${drug.unit} ${formatInterval(order.interval)} up to ${order.maxDose} ${drug.unit}. Target ${target.metric} ${target.comparator} ${target.value} ${target.unit}.`
+  return `Start at ${order.startDose} ${drug.unit} IV, titrate ${order.increment} ${drug.unit} ${formatInterval(order.interval)} up to ${order.maxDose} ${drug.unit}. Target ${formatTargetClause(order.target)}.`
 }
 
 /**

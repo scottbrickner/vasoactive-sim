@@ -3,8 +3,10 @@ import { Button, InlineConfirm, Toast } from '../../design/primitives'
 import { priorAgentsActivationMet, useSimStore, type PendingOverride } from '../../state/store'
 import { useSkillTrackingStore } from '../../state/skillTrackingStore'
 import { getDrug } from '../../data/formulary'
+import { MEDICATION_VERIFICATION } from '../../data/policy'
 import { buildOutstandingChartingItems } from '../../engine/documentation'
 import { resolveDecisionPoint } from '../../engine/decisionPoints'
+import { formatTargetClause } from '../../engine/orderText'
 import { scoreSession } from '../../engine/scoring'
 import { CernerChartingStatus, CernerMAR, InfusionsPanel, type PumpChannelInfo } from '../../devices'
 import { DecisionCard } from '../DecisionCard'
@@ -13,6 +15,7 @@ import { OrdersReferenceCard } from '../OrdersReferenceCard'
 import { StatusStrip } from '../StatusStrip'
 import { TitrationVitalsHistory } from '../TitrationVitalsHistory'
 import { VerificationPanel } from '../VerificationPanel'
+import { IndependentCheckPanel } from '../IndependentCheckPanel'
 import { OverrideConfirmPanel } from '../OverrideConfirmPanel'
 import { PacingOfferPanel } from '../PacingOfferPanel'
 import { SubmitConfirmPanel } from '../SubmitConfirmPanel'
@@ -29,6 +32,15 @@ import type { LogEntry, Order } from '../../state/types'
  * verified (see CLAUDE.md's narrowed verification scope).
  */
 type PendingAction = { kind: 'initiate'; orderId: string; dose: number }
+
+/**
+ * Phase 19d: awaiting the independent (two-nurse) double-check, opened after
+ * VerificationPanel's own confirm for a drug where MEDICATION_VERIFICATION marks
+ * `independentDoubleCheckRequired: true` — component-local, matching pendingAction's own
+ * precedent (the store's pending-X fields are reserved for state that needs to survive
+ * outside this single confirm flow, e.g. across a decision-point pick).
+ */
+type PendingIndependentCheck = { orderId: string; dose: number }
 
 interface PendingInfo {
   title: string
@@ -94,6 +106,7 @@ export function Simulation() {
   const orders = useSimStore((s) => s.orders)
   const log = useSimStore((s) => s.log)
   const verificationFlags = useSimStore((s) => s.verificationFlags)
+  const independentCheckFlags = useSimStore((s) => s.independentCheckFlags)
   const adherenceFlags = useSimStore((s) => s.adherenceFlags)
   const blockOfChartingHistory = useSimStore((s) => s.blockOfChartingHistory)
   const vitalsHistory = useSimStore((s) => s.vitalsHistory)
@@ -123,11 +136,16 @@ export function Simulation() {
   const recordAttempt = useSkillTrackingStore((s) => s.recordAttempt)
 
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
+  const [pendingIndependentCheck, setPendingIndependentCheck] = useState<PendingIndependentCheck | null>(null)
   const [showSubmitConfirm, setShowSubmitConfirm] = useState(false)
   const [advanceConfirm, setAdvanceConfirm] = useState<{ tick: number; message: string } | null>(null)
   const [chartConfirm, setChartConfirm] = useState<number | null>(null)
   const locked =
-    pendingAction !== null || pendingOverride !== null || pendingDecisionPoint !== null || pendingPacingOffer !== null
+    pendingAction !== null ||
+    pendingIndependentCheck !== null ||
+    pendingOverride !== null ||
+    pendingDecisionPoint !== null ||
+    pendingPacingOffer !== null
 
   function handleAdvanceClock(byMinutes: number) {
     advanceClock(byMinutes)
@@ -143,27 +161,37 @@ export function Simulation() {
         order,
         drug: getDrug(order.drugId),
         infusion,
-        isActivated: order.sequence === 1 || priorAgentsActivationMet(infusions, orders, vitals.map, order),
+        isActivated: order.sequence === 1 || priorAgentsActivationMet(infusions, orders, vitals, order),
       }
     })
 
   function handleConfirm() {
     if (!pendingAction) return
-    submitDose(pendingAction.orderId, pendingAction.dose)
+    const order = orders.find((o) => o.id === pendingAction.orderId)
+    const requiresIndependentCheck = order != null && MEDICATION_VERIFICATION[order.drugId].independentDoubleCheckRequired
+    const { orderId, dose } = pendingAction
     setPendingAction(null)
+    // Phase 19d: a drug requiring the independent double-check doesn't submit yet —
+    // VerificationPanel's own (single-nurse) confirm just satisfied BCMA/I-TRACE; the
+    // ADDITIONAL two-nurse check still has to happen before the dose is actually
+    // programmed (see IndependentCheckPanel below).
+    if (requiresIndependentCheck) {
+      setPendingIndependentCheck({ orderId, dose })
+      return
+    }
+    submitDose(orderId, dose)
   }
 
   const outstandingItems = buildOutstandingChartingItems(orders, infusions, log, verificationFlags)
   const decisionPoint = pendingDecisionPoint
     ? resolveDecisionPoint(scenario.decisionPoints ?? [], orders, pendingDecisionPoint.decisionPointId)
     : null
-  const primaryOrder = orders.find((o) => o.sequence === 1)
 
   // Records this run (training or validation) into the skill-tracking store (Phase 15)
   // right before every debrief arrival — a separate store from useSimStore, so a
   // facilitated session's cross-window state broadcast (Phase 10) never overwrites it.
   function recordThisAttempt() {
-    const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory })
+    const card = scoreSession({ orders, infusions, log, verificationFlags, independentCheckFlags, adherenceFlags, blockOfChartingHistory })
     recordAttempt({ card, scenarioId: scenario.id, scenarioLabel: scenario.admissionReason, mode })
   }
 
@@ -206,6 +234,22 @@ export function Simulation() {
         />
       )}
 
+      {pendingIndependentCheck &&
+        (() => {
+          const order = orders.find((o) => o.id === pendingIndependentCheck.orderId)
+          if (!order) return null
+          return (
+            <IndependentCheckPanel
+              drugName={getDrug(order.drugId).name}
+              onConfirm={(independentCheck) => {
+                submitDose(pendingIndependentCheck.orderId, pendingIndependentCheck.dose, { independentCheck })
+                setPendingIndependentCheck(null)
+              }}
+              onCancel={() => setPendingIndependentCheck(null)}
+            />
+          )
+        })()}
+
       {pendingOverride && (
         <OverrideConfirmPanel
           title={buildOverrideTitle(pendingOverride, orders)}
@@ -245,7 +289,12 @@ export function Simulation() {
         />
       )}
 
-      <StatusStrip clockMinutes={clockMinutes} vitals={vitals} targetLabel={primaryOrder ? `${primaryOrder.target.metric} ≥ ${primaryOrder.target.value} ${primaryOrder.target.unit}` : undefined} />
+      <StatusStrip
+        clockMinutes={clockMinutes}
+        vitals={vitals}
+        orders={orders}
+        targetLabels={orders.map((o) => formatTargetClause(o.target))}
+      />
 
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface p-3 shadow-sm">
         <span className="text-sm font-semibold text-ink">Advance time</span>
@@ -288,7 +337,7 @@ export function Simulation() {
         />
       )}
 
-      <TitrationVitalsHistory log={log} vitalsHistory={vitalsHistory} />
+      <TitrationVitalsHistory log={log} vitalsHistory={vitalsHistory} orders={orders} />
 
       <div className="grid gap-gutter md:grid-cols-2">
         <div className="flex flex-col gap-gutter">

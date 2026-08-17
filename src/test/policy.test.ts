@@ -9,6 +9,7 @@ import {
   SKILL_SIGNOFF_CRITERIA,
   STABLE_OFF_TWO_HOURS_RULE,
 } from '../data/policy'
+import type { DrugId } from '../state/types'
 
 describe('policy constants (CP 4-156)', () => {
   it('has the 4-point documentation cadence in order', () => {
@@ -27,11 +28,25 @@ describe('policy constants (CP 4-156)', () => {
     expect(DOCUMENTATION_PLACEMENT.discontinuation).toBe('MAR')
   })
 
-  it('does not require an independent double-check, but does require BCMA/I-TRACE at initiation and every titration', () => {
-    expect(MEDICATION_VERIFICATION.independentDoubleCheckRequired).toBe(false)
-    expect(MEDICATION_VERIFICATION.bcmaRequired).toBe(true)
-    expect(MEDICATION_VERIFICATION.iTraceRequired).toBe(true)
-    expect(MEDICATION_VERIFICATION.appliesTo).toEqual(['initiation', 'titration'])
+  it('requires an independent double-check only for fentanyl; every other DrugId (incl. dexmedetomidine/diltiazem) does not', () => {
+    const allDrugIds: DrugId[] = [
+      'norepinephrine',
+      'epinephrine',
+      'phenylephrine',
+      'dopamine',
+      'dobutamine',
+      'milrinone',
+      'vasopressin',
+      'dexmedetomidine',
+      'diltiazem',
+      'fentanyl',
+    ]
+    for (const drugId of allDrugIds) {
+      expect(MEDICATION_VERIFICATION[drugId]).toBeDefined()
+      expect(MEDICATION_VERIFICATION[drugId].bcmaRequired).toBe(true)
+      expect(MEDICATION_VERIFICATION[drugId].iTraceRequired).toBe(true)
+      expect(MEDICATION_VERIFICATION[drugId].independentDoubleCheckRequired).toBe(drugId === 'fentanyl')
+    }
   })
 
   it('defines the restart-after-pause and 2-hour rules', () => {

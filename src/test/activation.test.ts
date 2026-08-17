@@ -81,3 +81,33 @@ describe('deriveNextDecisionPoint', () => {
     expect(point).toMatchObject({ dose: 30 })
   })
 })
+
+// direction: 'down' — added after a user-reported bug: the pacing offer used to only
+// ever suggest an upward target, even mid-wean (weaningSupport scenario).
+describe('deriveNextDecisionPoint — direction: down', () => {
+  it("returns the weanOrder-bearing order's own startDose when currentDose is still above it", () => {
+    const order: Order = { ...norepiOrder, weanOrder: 3, startDose: 0.5 }
+    const point = deriveNextDecisionPoint(order, [order], 10, 'down')
+    expect(point).toEqual({ dose: 0.5, label: "reaching this order's own starting dose (ready to discontinue)" })
+  })
+
+  it('returns null for an order with no weanOrder — no sensible downward milestone to propose', () => {
+    expect(deriveNextDecisionPoint(norepiOrder, [norepiOrder], 10, 'down')).toBeNull()
+  })
+
+  it('returns null once currentDose is already at or below the order\'s own startDose', () => {
+    const order: Order = { ...norepiOrder, weanOrder: 3 }
+    expect(deriveNextDecisionPoint(order, [order], order.startDose, 'down')).toBeNull()
+  })
+
+  it('does not mix in the upward candidates (e.g. maxDose) even when they would otherwise apply', () => {
+    const order: Order = { ...norepiOrder, weanOrder: 3, earlyNotificationThreshold: 0.3 }
+    const point = deriveNextDecisionPoint(order, [order], 10, 'down')
+    expect(point).toEqual({ dose: 0.5, label: "reaching this order's own starting dose (ready to discontinue)" })
+  })
+
+  it('up-direction (the default) behavior is unchanged', () => {
+    expect(deriveNextDecisionPoint(norepiOrder, [norepiOrder], 5)).toMatchObject({ dose: 30 })
+    expect(deriveNextDecisionPoint(norepiOrder, [norepiOrder], 5, 'up')).toMatchObject({ dose: 30 })
+  })
+})

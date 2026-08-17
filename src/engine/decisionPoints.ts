@@ -7,6 +7,7 @@
  * React/DOM here per CLAUDE.md's engine-purity rule.
  */
 import { getDrug } from '../data/formulary'
+import { formatTargetGapText } from './orderText'
 import type { DecisionPoint, Order } from '../state/types'
 
 const AUTO_EARLY_NOTIFICATION_PREFIX = 'auto-early-notification-'
@@ -30,7 +31,7 @@ export function buildAutoEarlyNotificationDecisionPoint(order: Order): DecisionP
     id: autoEarlyNotificationDecisionPointId(order.id),
     trapType: 'earlyNotification',
     trigger: { kind: 'earlyNotification', orderId: order.id },
-    situation: `You've titrated ${drug.name} toward its early-notification checkpoint and ${order.target.metric} is still below target. What's your next move?`,
+    situation: `You've titrated ${drug.name} toward its early-notification checkpoint and ${formatTargetGapText(order.target)}. What's your next move?`,
     policyHint: 'CP 4-156: notify the provider if the target isn’t reached within the ordered range, or continue titrating within your own order.',
     options: [
       {

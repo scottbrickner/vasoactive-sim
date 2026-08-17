@@ -115,7 +115,7 @@ describe('physiology — scenario narrative: norepi alone is insufficient, vasop
 })
 
 describe('physiology.deriveBloodPressure', () => {
-  const startingVitals = { hr: 118, sbp: 80, dbp: 46, map: 57, spo2: 96, rhythm: 'Sinus tachycardia' }
+  const startingVitals = { hr: 118, sbp: 80, dbp: 46, map: 57, spo2: 96, rhythm: 'Sinus tachycardia', rass: 0, painScore: 0 }
 
   it('reproduces the starting SBP/DBP when MAP is unchanged', () => {
     expect(deriveBloodPressure(57, startingVitals)).toEqual({ sbp: 80, dbp: 46 })

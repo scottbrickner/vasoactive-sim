@@ -5,6 +5,7 @@
  * comparison this text describes. Pure — no React/DOM, no store coupling.
  */
 import { getDrug } from '../data/formulary'
+import { formatTargetGapText } from './orderText'
 import type { Order } from '../state/types'
 
 export function deriveActivationText(order: Order, allOrders: Order[]): string | undefined {
@@ -22,8 +23,7 @@ export function deriveActivationText(order: Order, allOrders: Order[]): string |
     return `${drug.name} at ${doseText} ${drug.unit} (${Math.round(fraction * 100)}% of its ordered maximum)`
   })
 
-  const { target } = order
-  return `${conditions.join(' and ')} with ${target.metric} still < ${target.value} ${target.unit}.`
+  return `${conditions.join(' and ')} with ${formatTargetGapText(order.target)}.`
 }
 
 export interface NextDecisionPoint {
@@ -38,11 +38,36 @@ export interface NextDecisionPoint {
  * pacing-offer checkpoint (state/store.ts's pendingPacingOffer) to suggest a sensible
  * fast-forward target after a few manual titrations, distinct from the CLINICAL
  * early-notification checkpoint (which fires exactly at its own threshold, not before).
- * Considers: this order's own earlyNotificationThreshold, a dependent (sequence+1) order's
- * activation threshold relative to this order, and this order's own maxDose — picks
- * whichever is soonest. Returns null when currentDose is already at/past every milestone.
+ *
+ * `direction` (default 'up') covers the climbing case: considers this order's own
+ * earlyNotificationThreshold, a dependent (sequence+1) order's activation threshold
+ * relative to this order, and this order's own maxDose — picks whichever is soonest.
+ * Returns null when currentDose is already at/past every milestone.
+ *
+ * `direction: 'down'` covers a learner weaning this order DOWN instead (added after a
+ * user-reported bug — the pacing offer used to only ever suggest an upward target, even
+ * mid-wean). There's exactly one sensible downward milestone: this order's own
+ * `startDose` (mirrors priorAgentsWeaned's own definition of "cleared" — down to at/below
+ * startDose), and only for a `weanOrder`-bearing order still above it. Deliberately does
+ * NOT fall through to the upward candidates above — the "nearest by raw dose value"
+ * reduce logic assumes every candidate is on the same side of currentDose, and mixing
+ * up/down candidates would break that invariant. An order with no weanOrder (or already
+ * at/below its own startDose) has no sensible downward milestone to propose, so this
+ * returns null — no offer should fire.
  */
-export function deriveNextDecisionPoint(order: Order, allOrders: Order[], currentDose: number): NextDecisionPoint | null {
+export function deriveNextDecisionPoint(
+  order: Order,
+  allOrders: Order[],
+  currentDose: number,
+  direction: 'up' | 'down' = 'up',
+): NextDecisionPoint | null {
+  if (direction === 'down') {
+    if (order.weanOrder != null && currentDose > order.startDose) {
+      return { dose: order.startDose, label: "reaching this order's own starting dose (ready to discontinue)" }
+    }
+    return null
+  }
+
   const candidates: NextDecisionPoint[] = []
 
   if (order.earlyNotificationThreshold != null) {

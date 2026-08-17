@@ -10,11 +10,14 @@ const ALL_DRUG_IDS: DrugId[] = [
   'dobutamine',
   'milrinone',
   'vasopressin',
+  'fentanyl',
+  'dexmedetomidine',
+  'diltiazem',
 ]
 
 describe('formulary', () => {
-  it('parses all 7 Attachment B entries with a well-formed shape', () => {
-    expect(FORMULARY_LIST).toHaveLength(7)
+  it('parses all 10 Attachment B entries with a well-formed shape', () => {
+    expect(FORMULARY_LIST).toHaveLength(10)
     for (const id of ALL_DRUG_IDS) {
       const drug = getDrug(id)
       expect(drug.id).toBe(id)
@@ -34,11 +37,11 @@ describe('formulary', () => {
     }
   })
 
-  it('marks exactly the mcg/kg/min drugs as weight-based', () => {
+  it('marks exactly the per-kg drugs (mcg/kg/min and mcg/kg/hr) as weight-based', () => {
     const weightBased = FORMULARY_LIST.filter((d) => d.weightBased).map((d) => d.id).sort()
-    expect(weightBased).toEqual(['dobutamine', 'dopamine', 'milrinone'])
+    expect(weightBased).toEqual(['dexmedetomidine', 'dobutamine', 'dopamine', 'milrinone'])
     for (const drug of FORMULARY_LIST) {
-      expect(drug.weightBased).toBe(drug.unit === 'mcg/kg/min')
+      expect(drug.weightBased).toBe(drug.unit === 'mcg/kg/min' || drug.unit === 'mcg/kg/hr')
     }
   })
 
@@ -62,6 +65,49 @@ describe('formulary', () => {
   it('norepinephrine is NOT weight-based (dosed in mcg/min per CLAUDE.md)', () => {
     expect(FORMULARY.norepinephrine.weightBased).toBe(false)
     expect(FORMULARY.norepinephrine.unit).toBe('mcg/min')
+  })
+
+  // Phase 19e: fentanyl/dexmedetomidine/diltiazem, sourced from Attachment B (see
+  // Phase 19 plan section) — values reproduced exactly, not re-derived.
+  describe('Phase 19e additions', () => {
+    it('fentanyl (Sublimaze) — 1000 mcg/100 mL, 25 mcg/hr start, 10 mcg/hr q10min, max 150 mcg/hr', () => {
+      const drug = FORMULARY.fentanyl
+      expect(drug.genericName).toBe('Sublimaze')
+      expect(drug.concentration).toEqual({ amount: 1000, amountUnit: 'mcg', volumeMl: 100 })
+      expect(drug.unit).toBe('mcg/hr')
+      expect(drug.weightBased).toBe(false)
+      expect(drug.startDose).toBe(25)
+      expect(drug.titrationIncrement).toBe(10)
+      expect(drug.titrationInterval).toEqual({ minMinutes: 10 })
+      expect(drug.maxDose).toBe(150)
+      expect(drug.monitoring).toEqual(['Respiratory status', 'Cardiovascular status', 'BP', 'HR', 'Pain score'])
+    })
+
+    it('dexmedetomidine (Precedex) — 200 mcg/250 mL, 0.2 mcg/kg/hr start, 0.1 mcg/kg/hr q30min, max 0.7 mcg/kg/hr', () => {
+      const drug = FORMULARY.dexmedetomidine
+      expect(drug.genericName).toBe('Precedex')
+      expect(drug.concentration).toEqual({ amount: 200, amountUnit: 'mcg', volumeMl: 250 })
+      expect(drug.unit).toBe('mcg/kg/hr')
+      expect(drug.weightBased).toBe(true)
+      expect(drug.startDose).toBe(0.2)
+      expect(drug.titrationIncrement).toBe(0.1)
+      expect(drug.titrationInterval).toEqual({ minMinutes: 30 })
+      expect(drug.maxDose).toBe(0.7)
+      expect(drug.monitoring).toEqual(['RASS', 'HR', 'Respiration', 'Rhythm'])
+    })
+
+    it('diltiazem (Cardizem) — 125 mg/125 mL, 5 mg/hr start, 5 mg/hr q15min, max 15 mg/hr', () => {
+      const drug = FORMULARY.diltiazem
+      expect(drug.genericName).toBe('Cardizem')
+      expect(drug.concentration).toEqual({ amount: 125, amountUnit: 'mg', volumeMl: 125 })
+      expect(drug.unit).toBe('mg/hr')
+      expect(drug.weightBased).toBe(false)
+      expect(drug.startDose).toBe(5)
+      expect(drug.titrationIncrement).toBe(5)
+      expect(drug.titrationInterval).toEqual({ minMinutes: 15 })
+      expect(drug.maxDose).toBe(15)
+      expect(drug.monitoring).toEqual(['BP', 'HR', 'EKG'])
+    })
   })
 })
 

@@ -1,19 +1,24 @@
 import { formatClock } from '../lib/time'
-import type { VitalSigns } from '../state/types'
+import type { Order, VitalSigns } from '../state/types'
 
 export interface StatusStripProps {
   clockMinutes: number
   vitals: VitalSigns
-  targetLabel?: string
+  /** Every order in the session — used only to gate the conditional RASS/painScore cells below (MAP/HR/BP/SpO2 stay unconditional). */
+  orders: Order[]
+  /** One chip per order's target clause (see engine/orderText.ts's formatTargetClause), Phase 19b's widening from a single primary-order chip. */
+  targetLabels?: string[]
 }
 
 /**
  * Phase 18's live-vitals surface for the "clean workspace" screen, replacing
  * PhilipsMonitor here (that component stays importable, just unrouted from this
  * screen — see Simulation.tsx). No waveforms, per the validated mockup — just the
- * numbers a nurse actually reasons from at the bedside.
+ * numbers a nurse actually reasons from at the bedside. RASS/painScore cells (Phase 19b)
+ * show only when some order in the session actually targets them, so a vasoactive-only
+ * scenario doesn't grow two permanently-inert cells.
  */
-export function StatusStrip({ clockMinutes, vitals, targetLabel }: StatusStripProps) {
+export function StatusStrip({ clockMinutes, vitals, orders, targetLabels }: StatusStripProps) {
   const cells: { label: string; value: string }[] = [
     { label: 'Clock', value: `${formatClock(clockMinutes)}` },
     { label: 'MAP', value: `${vitals.map} mmHg` },
@@ -21,6 +26,12 @@ export function StatusStrip({ clockMinutes, vitals, targetLabel }: StatusStripPr
     { label: 'BP', value: `${vitals.sbp}/${vitals.dbp}` },
     { label: 'SpO2', value: `${vitals.spo2}%` },
   ]
+  if (orders.some((o) => o.target.metric === 'RASS')) {
+    cells.push({ label: 'RASS', value: `${vitals.rass}` })
+  }
+  if (orders.some((o) => o.target.metric === 'painScore')) {
+    cells.push({ label: 'Pain score', value: `${vitals.painScore}` })
+  }
   return (
     <div className="flex flex-wrap items-center gap-4 rounded-md border border-border bg-surface p-3 shadow-sm">
       {cells.map((cell) => (
@@ -29,10 +40,21 @@ export function StatusStrip({ clockMinutes, vitals, targetLabel }: StatusStripPr
           <span className="font-mono text-lg font-bold text-ink tabular-nums">{cell.value}</span>
         </div>
       ))}
-      {targetLabel && (
-        <span className="ml-auto rounded-full bg-gold-soft px-3 py-1 text-xs font-semibold text-cardinal-dark">
-          Target {targetLabel}
-        </span>
+      {targetLabels && targetLabels.length > 0 && (
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {targetLabels.map((label, i) => (
+            // Keyed by position, not label text — two different orders (e.g. a
+            // multi-agent scenario's sequence-1/2 agents) can share the identical
+            // formatted clause (both targeting the same "MAP >= 65 mmHg"), which would
+            // otherwise collide as a React key.
+            <span
+              key={i}
+              className="rounded-full bg-gold-soft px-3 py-1 text-xs font-semibold text-cardinal-dark"
+            >
+              Target {label}
+            </span>
+          ))}
+        </div>
       )}
     </div>
   )

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from '../App'
@@ -18,7 +18,7 @@ afterEach(() => {
 })
 
 describe('app shell', () => {
-  it('renders the branded header with sim clock, MAP, and target readouts', () => {
+  it('renders the branded header with sim clock and current-value/target readouts', () => {
     render(<App />)
     const header = screen.getByRole('banner')
     expect(within(header).getByText('Vasoactive Titration Simulator')).toBeInTheDocument()
@@ -26,8 +26,11 @@ describe('app shell', () => {
     const status = within(header).getByLabelText('Simulation status')
     expect(within(status).getByText('Sim time')).toBeInTheDocument()
     expect(within(status).getByText('00:00')).toBeInTheDocument()
-    expect(within(status).getByText('Current MAP')).toBeInTheDocument()
-    expect(within(status).getByText('Target MAP')).toBeInTheDocument()
+    // Phase 19b: the header generalized from MAP-specific "Current MAP"/"Target MAP"
+    // labels to metric-agnostic "Current"/"Target" ones (see Header.tsx/HeaderReadout) —
+    // the sequence-1 order's own metric now shows up inside the value string instead.
+    expect(within(status).getByText('Current')).toBeInTheDocument()
+    expect(within(status).getByText('Target')).toBeInTheDocument()
     // Both blank before the sim starts — the intro screen hasn't picked (and may
     // randomize away from) the last-loaded scenario, so showing its stale target would
     // misrepresent the upcoming one (see Header.tsx).
@@ -55,6 +58,21 @@ describe('app shell', () => {
 
     await user.click(screen.getByRole('button', { name: 'Restart simulation' }))
     expect(screen.getByRole('heading', { name: 'Welcome to the simulation' })).toBeInTheDocument()
+  })
+
+  it('renders a "between" comparator target in full on the Goal line (Phase 19b regression)', () => {
+    // ScenarioIntro.pickRandomScenario picks uniformly across SCENARIO_POOL (6 scenarios,
+    // Object.values order); DILTIAZEM_RATE_CONTROL is last, so Math.random() just under 1
+    // selects it deterministically. Its sequence-1 order targets HR between 60-100 bpm —
+    // the hand-rolled template this guards against silently dropped valueHigh, rendering
+    // "HR between 60 bpm" instead (see formatTargetClause in engine/orderText.ts).
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.999)
+    try {
+      render(<App />)
+      expect(screen.getByText('HR between 60-100 bpm')).toBeInTheDocument()
+    } finally {
+      randomSpy.mockRestore()
+    }
   })
 
   it('gates "Begin simulation" on a valid learner identity only in Validation mode (Phase 15)', async () => {

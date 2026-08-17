@@ -3,6 +3,7 @@ import { Button, Field, Panel, Toast } from '../../design/primitives'
 import { useSimStore } from '../../state/store'
 import { useSkillTrackingStore } from '../../state/skillTrackingStore'
 import { isValidInstitutionalEmail } from '../../lib/learnerIdentity'
+import { formatTargetClause } from '../../engine/orderText'
 import { SCENARIOS } from '../../data/scenarios'
 import type { ScenarioConfig, SimMode } from '../../state/types'
 
@@ -67,7 +68,7 @@ export function ScenarioIntro() {
           {[
             ['Patient', `${patient.ageYears} ${patient.sex === 'female' ? 'F' : 'M'} · ${patient.weightKg} kg`],
             ['Admission', admissionReason],
-            ['Goal', primaryTarget ? `${primaryTarget.metric} ${primaryTarget.comparator} ${primaryTarget.value} ${primaryTarget.unit}` : '—'],
+            ['Goal', primaryTarget ? formatTargetClause(primaryTarget) : '—'],
           ].map(([label, value]) => (
             <div key={label}>
               <dt className="text-xs font-semibold tracking-wide text-muted uppercase">{label}</dt>

@@ -9,12 +9,16 @@ export interface VerificationPanelProps {
 
 /**
  * The CP 4-156 verification gate: a BCMA + I-TRACE self-check the administering nurse
- * performs at initiation and every titration of a vasoactive infusion. Vasoactives are
- * NOT designated high-alert at this institution, so this is a single-nurse
- * verification — no independent (two-nurse) double-check is required (see CLAUDE.md's
- * non-negotiable rules). Shell-register (branded, coaching), not a device replica —
- * this workflow happens around the pump, not on it. Still blocking by design, unlike
- * the softer, flagged-not-blocked handling of documentation cadence elsewhere in this sim.
+ * performs once, at initiation (see CLAUDE.md's non-negotiable rules) — for EVERY drug
+ * in the formulary, including genuinely high-alert ones. This is always a single-nurse
+ * check; a separate, ADDITIONAL independent (two-nurse) double-check gate
+ * (IndependentCheckPanel.tsx) layers on top of this one for drugs where
+ * `data/policy.ts`'s per-`DrugId` MEDICATION_VERIFICATION marks
+ * `independentDoubleCheckRequired: true` (fentanyl, as of Phase 19d — vasoactives,
+ * dexmedetomidine, and diltiazem don't need it). Shell-register (branded, coaching),
+ * not a device replica — this workflow happens around the pump, not on it. Still
+ * blocking by design, unlike the softer, flagged-not-blocked handling of documentation
+ * cadence elsewhere in this sim.
  */
 export function VerificationPanel({ title, checklist, onConfirm, onCancel }: VerificationPanelProps) {
   return (

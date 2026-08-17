@@ -14,7 +14,118 @@
  * (phenylephrine, sequence 3) weans first (weanOrder 1); the first-line mainstay
  * (norepinephrine, sequence 1) weans last (weanOrder 3).
  */
-import type { ScenarioConfig } from '../../state/types'
+import type { DecisionPoint, ScenarioConfig } from '../../state/types'
+
+/**
+ * Phase 19g's authored decision points for this scenario. The primary weanEligible
+ * point is listed FIRST — `isWeanEligible`/`allTargetsMet` are both already true from
+ * minute 0 (all three agents pre-seeded infusing, MAP already above target), so the very
+ * first titrate a learner makes on ANY of the three orders would otherwise race against
+ * that same order's own postTitrate point; listing weanEligible first in this array
+ * guarantees it wins that race every time (state/store.ts's deriveTriggeredDecisionPointId
+ * returns on the FIRST matching decision point in array order), matching the intended
+ * "which agent weans first" as the actual first decision a learner faces here. The two
+ * postTitrate points that follow are scoped to vasopressin/norepinephrine specifically
+ * (not phenylephrine, whose own first wean action is already covered by the primary
+ * point above) so they naturally fire later, once the learner works down the ladder.
+ */
+const DECISION_POINTS: DecisionPoint[] = [
+  {
+    id: 'weaning-support-weaning-sequence',
+    trapType: 'weanSequence',
+    trigger: { kind: 'weanEligible' },
+    situation: 'All three agents are infusing and MAP is comfortably above target. What next?',
+    policyHint: 'CP 4-156 wean priority: clear the most recently added adjunct agent first — phenylephrine, then vasopressin, then norepinephrine last.',
+    options: [
+      {
+        id: 'wean-phenylephrine',
+        label: 'Wean phenylephrine one step',
+        caption: 'Phenylephrine was added most recently — it weans first.',
+        group: 'covered',
+        effect: { kind: 'submitDoseRelative', orderId: 'order-phenylephrine-ws', deltaSteps: -1 },
+        feedback: { text: 'Correct — the most recently added adjunct agent weans first.' },
+      },
+      {
+        id: 'wean-vasopressin',
+        label: 'Wean vasopressin one step',
+        caption: 'Vasopressin is the second agent added.',
+        group: 'gap',
+        effect: { kind: 'submitDoseRelative', orderId: 'order-vasopressin-ws', deltaSteps: -1 },
+        feedback: { text: 'Vasopressin has a lower wean priority than phenylephrine — clear phenylephrine first before weaning this agent.' },
+      },
+      {
+        id: 'wean-norepinephrine',
+        label: 'Wean norepinephrine one step',
+        caption: 'Norepinephrine is the mainstay agent.',
+        group: 'gap',
+        effect: { kind: 'submitDoseRelative', orderId: 'order-norepinephrine-ws', deltaSteps: -1 },
+        feedback: {
+          text: 'Norepinephrine is the mainstay agent and weans last — both phenylephrine and vasopressin need to be cleared first.',
+        },
+      },
+    ],
+  },
+  {
+    id: 'weaning-support-documentation-vasopressin',
+    trapType: 'documentationPlacement',
+    trigger: { kind: 'postTitrate', orderId: 'order-vasopressin-ws' },
+    situation: "You've just titrated vasopressin. Time to document the assessment that justifies it.",
+    policyHint: "Document citing the parameter you're actually titrating toward — MAP — not a parameter that's simply monitored.",
+    options: [
+      {
+        id: 'chart-map',
+        label: 'Chart the assessment, citing MAP',
+        caption: 'MAP is what every agent here is titrated toward.',
+        group: 'covered',
+        effect: { kind: 'chartVitals' },
+        feedback: {
+          text: "Correct — MAP is the shared titration target for all three agents in this scenario; that's the parameter your documentation should justify the change against.",
+        },
+      },
+      {
+        id: 'chart-hr',
+        label: 'Chart the assessment, citing heart rate',
+        caption: 'HR has settled since stabilizing.',
+        group: 'gap',
+        effect: { kind: 'none' },
+        manualTone: 'caution',
+        feedback: {
+          text: 'HR is monitored, not targeted, here — vasopressin (like the other two agents) is titrated to MAP. Citing HR instead is the wrong parameter for this documentation.',
+        },
+      },
+    ],
+  },
+  {
+    id: 'weaning-support-documentation-norepinephrine',
+    trapType: 'documentationPlacement',
+    trigger: { kind: 'postTitrate', orderId: 'order-norepinephrine-ws' },
+    situation: "You've just titrated norepinephrine — the last agent left in the wean sequence. Time to document the assessment that justifies it.",
+    policyHint: "Document citing the parameter you're actually titrating toward — MAP — not a parameter that's simply monitored.",
+    options: [
+      {
+        id: 'chart-map',
+        label: 'Chart the assessment, citing MAP',
+        caption: 'MAP is what every agent here is titrated toward.',
+        group: 'covered',
+        effect: { kind: 'chartVitals' },
+        feedback: {
+          text: "Correct — even this far down the wean ladder, MAP is still the parameter that justifies the change, the same as it was for the first agent weaned.",
+        },
+      },
+      {
+        id: 'chart-hr',
+        label: 'Chart the assessment, citing heart rate',
+        caption: 'HR is a little higher since the last agent was weaned.',
+        group: 'gap',
+        effect: { kind: 'none' },
+        manualTone: 'caution',
+        feedback: {
+          text: 'HR is worth watching as support comes off, but it is monitored here, not the titration target — norepinephrine, like the other two agents, is titrated to MAP.',
+        },
+      },
+    ],
+  },
+]
 
 export const WEANING_SUPPORT: ScenarioConfig = {
   id: 'weaning-support',
@@ -32,6 +143,8 @@ export const WEANING_SUPPORT: ScenarioConfig = {
     map: 74,
     spo2: 97,
     rhythm: 'Sinus rhythm',
+    rass: 0,
+    painScore: 0,
   },
   initialInfusions: [
     {
@@ -116,15 +229,15 @@ export const WEANING_SUPPORT: ScenarioConfig = {
   priorVitals: [
     {
       minutesBeforeStart: 180,
-      vitals: { hr: 108, sbp: 84, dbp: 50, map: 61, spo2: 94, rhythm: 'Sinus tachycardia' },
+      vitals: { hr: 108, sbp: 84, dbp: 50, map: 61, spo2: 94, rhythm: 'Sinus tachycardia', rass: 0, painScore: 0 },
     },
     {
       minutesBeforeStart: 120,
-      vitals: { hr: 100, sbp: 90, dbp: 56, map: 67, spo2: 95, rhythm: 'Sinus tachycardia' },
+      vitals: { hr: 100, sbp: 90, dbp: 56, map: 67, spo2: 95, rhythm: 'Sinus tachycardia', rass: 0, painScore: 0 },
     },
     {
       minutesBeforeStart: 60,
-      vitals: { hr: 96, sbp: 94, dbp: 60, map: 71, spo2: 96, rhythm: 'Sinus rhythm' },
+      vitals: { hr: 96, sbp: 94, dbp: 60, map: 71, spo2: 96, rhythm: 'Sinus rhythm', rass: 0, painScore: 0 },
     },
   ],
   // Modest ceilings — these three agents are already largely responsible for the
@@ -146,4 +259,5 @@ export const WEANING_SUPPORT: ScenarioConfig = {
   objective:
     "Wean vasoactive support in the correct order — clear the most recently added adjunct agent before reducing the next, confirming MAP holds above target at each step.",
   enableBlockOfCharting: false,
+  decisionPoints: DECISION_POINTS,
 }

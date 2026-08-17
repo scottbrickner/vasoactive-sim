@@ -3,7 +3,7 @@ import { vitalsAtMinute } from '../engine/vitalsAtMinute'
 import type { VitalSigns } from '../state/types'
 
 function vitals(overrides: Partial<VitalSigns> = {}): VitalSigns {
-  return { hr: 90, sbp: 100, dbp: 60, map: 73, spo2: 96, rhythm: 'Sinus', ...overrides }
+  return { hr: 90, sbp: 100, dbp: 60, map: 73, spo2: 96, rhythm: 'Sinus', rass: 0, painScore: 0, ...overrides }
 }
 
 describe('vitalsAtMinute', () => {

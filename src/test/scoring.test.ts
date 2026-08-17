@@ -439,3 +439,71 @@ describe('scoreSession — category 9, clinical judgment (Phase 18 decision poin
     expect(categoryStatus('clinicalJudgment')).toBe('missed')
   })
 })
+
+describe('scoreSession — Phase 19d independent double-check (category 4 extension)', () => {
+  const FENTANYL_ORDER_ID = 'order-fentanyl-test'
+
+  /** A minimal fentanyl order + pre-seeded hanging (Begin-Bag-complete) infusion — real Attachment B values from data/formulary.ts. */
+  function seedFentanylOrder() {
+    useSimStore.setState((s) => ({
+      orders: [
+        ...s.orders,
+        {
+          id: FENTANYL_ORDER_ID,
+          drugId: 'fentanyl',
+          sequence: 1,
+          startDose: 25,
+          maxDose: 150,
+          increment: 10,
+          interval: { minMinutes: 10 },
+          target: { metric: 'painScore', comparator: '<=', value: 4, unit: 'score' },
+        },
+      ],
+      infusions: [
+        ...s.infusions,
+        {
+          id: 'infusion-fentanyl-test',
+          orderId: FENTANYL_ORDER_ID,
+          drugId: 'fentanyl',
+          status: 'hanging',
+          rate: 0,
+          initialRate: null,
+          channel: 'B',
+          beginBagCompleted: true,
+          lastActionMinute: null,
+          stoppedAtMinute: null,
+          rateBeforePause: null,
+        },
+      ],
+    }))
+  }
+
+  it('counts a fentanyl initiate as verified once both BCMA/I-TRACE and the independent double-check completed', () => {
+    seedFentanylOrder()
+    useSimStore
+      .getState()
+      .submitDose(FENTANYL_ORDER_ID, 25, { independentCheck: { secondCheckName: 'Pat Nguyen', secondCheckRole: 'RN' } })
+    expect(categoryStatus('verification')).toBe('met')
+  })
+
+  it('does NOT count a verified-but-not-independently-checked entry as verified for a drug requiring the check — defensive-only, since store.ts\'s hard gate already prevents this from happening live', () => {
+    useSimStore.setState((s) => ({
+      log: [
+        ...s.log,
+        {
+          id: 'manual-fentanyl-entry',
+          minute: 0,
+          type: 'action',
+          summary: 'Initiate Fentanyl to 25 mcg/hr — applied.',
+          doseAction: 'initiate',
+          orderId: 'manual-order',
+          drugId: 'fentanyl',
+          outcome: 'applied',
+        },
+      ],
+      verificationFlags: { ...s.verificationFlags, 'manual-fentanyl-entry': true },
+      // independentCheckFlags deliberately left unset for this entry.
+    }))
+    expect(categoryStatus('verification')).not.toBe('met')
+  })
+})

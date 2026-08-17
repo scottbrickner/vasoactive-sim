@@ -12,7 +12,7 @@
  * covered by formulary.test.ts, not a per-session learner behavior).
  */
 import { buildCadenceStatusForOrders } from './documentation'
-import { SKILL_SIGNOFF_CRITERIA } from '../data/policy'
+import { MEDICATION_VERIFICATION, SKILL_SIGNOFF_CRITERIA } from '../data/policy'
 import type { BlockOfChartingRecord, Infusion, LogEntry, Order } from '../state/types'
 
 export interface ScoringInput {
@@ -20,6 +20,8 @@ export interface ScoringInput {
   infusions: Infusion[]
   log: LogEntry[]
   verificationFlags: Record<string, boolean>
+  /** Phase 19d: independent (two-nurse) double-check completion, keyed like verificationFlags — see category 4 below. */
+  independentCheckFlags: Record<string, boolean>
   adherenceFlags: Record<string, boolean>
   blockOfChartingHistory: BlockOfChartingRecord[]
 }
@@ -53,7 +55,7 @@ function hasOwn(record: Record<string, boolean>, id: string): boolean {
 }
 
 export function scoreSession(input: ScoringInput): Scorecard {
-  const { orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory } = input
+  const { orders, infusions, log, verificationFlags, independentCheckFlags, adherenceFlags, blockOfChartingHistory } = input
   const doseEntries = log.filter((e) => e.type === 'action' && e.doseAction != null)
   // Order-compliance is deliberately bypassed under an active Block of Charting (CP
   // 4-156's emergent pathway — see store.ts's submitDose) — those entries were never
@@ -130,14 +132,25 @@ export function scoreSession(input: ScoringInput): Scorecard {
     })
   }
 
-  // 4. BCMA / I-TRACE verification. Vasoactives are NOT high-alert at this institution
-  // (see CLAUDE.md) — this is single-nurse verification, not an independent two-nurse
-  // double-check. `verificationFlags` is only ever set for Begin Bag / dose-entry
-  // actions (never provider notifications or charting), so membership alone identifies
-  // the verifiable actions without any string matching.
+  // 4. BCMA / I-TRACE verification, plus (Phase 19d) the independent two-nurse
+  // double-check for genuinely high-alert drugs (fentanyl — see data/policy.ts's
+  // per-DrugId MEDICATION_VERIFICATION; every vasoactive, dexmedetomidine, and
+  // diltiazem stay single-nurse). `verificationFlags` is only ever set for Begin Bag /
+  // dose-entry actions (never provider notifications or charting), so membership alone
+  // identifies the verifiable actions without any string matching. The
+  // independentCheckFlags check below is defensive-only — state/store.ts's submitDose
+  // hard-gates initiation on a high-alert drug behind the check already happening, so a
+  // "verified but not independently checked" entry should be unreachable in practice,
+  // matching category 5's own "system-enforced and always correct" framing.
   {
     const verifiable = log.filter((e) => e.type === 'action' && hasOwn(verificationFlags, e.id))
-    const verified = verifiable.filter((e) => verificationFlags[e.id]).length
+    const verified = verifiable.filter((e) => {
+      if (!verificationFlags[e.id]) return false
+      if (e.drugId && MEDICATION_VERIFICATION[e.drugId].independentDoubleCheckRequired) {
+        return independentCheckFlags[e.id] === true
+      }
+      return true
+    }).length
     categories.push({
       key: 'verification',
       label: 'BCMA / I-TRACE verification',

@@ -5,7 +5,7 @@
  * data only; the engine that enforces these rules (documentation.ts, guardrails.ts, …)
  * is Phase 4.
  */
-import type { DocumentationCadencePoint, DocumentationLocation } from '../state/types'
+import type { DocumentationCadencePoint, DocumentationLocation, DrugId } from '../state/types'
 
 export interface DocumentationCadenceEntry {
   point: DocumentationCadencePoint
@@ -55,21 +55,40 @@ export const DOCUMENTATION_PLACEMENT: Record<
   discontinuation: 'MAR',
 }
 
+export interface MedicationVerificationEntry {
+  independentDoubleCheckRequired: boolean
+  bcmaRequired: boolean
+  iTraceRequired: boolean
+}
+
 /**
- * Vasoactives are NOT designated high-alert at this institution — no independent
- * (two-nurse) double-check is required. BCMA verification against the order and
- * I-TRACE line-tracing still apply, performed by the administering nurse alone, at
- * initiation and every titration.
+ * Phase 19d: per-`DrugId` verification requirements — this used to be a single global
+ * "not high-alert" flag (correct for every vasoactive at this institution, per an
+ * earlier educator correction), but CP4-156.doc's own text treats sedation/analgesia
+ * with extra caution, and per the user's direct, real institutional confirmation:
+ * fentanyl (like propofol/midazolam/ketamine, out of scope this phase) IS high-alert
+ * and requires an independent (two-nurse) double-check before programming; the existing
+ * vasoactives, dexmedetomidine, and diltiazem do NOT. Modeled per-drug (not a one-off
+ * boolean) precisely so the propofol/midazolam/ketamine family can be added the same
+ * way later without restructuring this constant.
+ *
+ * BCMA verification against the order and I-TRACE line-tracing apply to every drug here
+ * regardless of high-alert status, performed by the administering nurse alone, once, at
+ * initiation (see state/store.ts's submitDose and CLAUDE.md's non-negotiable rules).
+ * The independent double-check, where required, is an ADDITIONAL gate on top of that —
+ * also initiation-only, never re-required at titration (see IndependentCheckPanel.tsx).
  */
-export const MEDICATION_VERIFICATION = {
-  independentDoubleCheckRequired: false,
-  bcmaRequired: true,
-  iTraceRequired: true,
-  appliesTo: ['initiation', 'titration'] as const,
-  description:
-    'Vasoactive infusions are not high-alert here, so no independent (two-nurse) double-check ' +
-    'is required. The administering nurse still verifies the medication against the order via ' +
-    'BCMA and traces the line to the patient (I-TRACE) at initiation and at every titration.',
+export const MEDICATION_VERIFICATION: Record<DrugId, MedicationVerificationEntry> = {
+  norepinephrine: { independentDoubleCheckRequired: false, bcmaRequired: true, iTraceRequired: true },
+  epinephrine: { independentDoubleCheckRequired: false, bcmaRequired: true, iTraceRequired: true },
+  phenylephrine: { independentDoubleCheckRequired: false, bcmaRequired: true, iTraceRequired: true },
+  dopamine: { independentDoubleCheckRequired: false, bcmaRequired: true, iTraceRequired: true },
+  dobutamine: { independentDoubleCheckRequired: false, bcmaRequired: true, iTraceRequired: true },
+  milrinone: { independentDoubleCheckRequired: false, bcmaRequired: true, iTraceRequired: true },
+  vasopressin: { independentDoubleCheckRequired: false, bcmaRequired: true, iTraceRequired: true },
+  dexmedetomidine: { independentDoubleCheckRequired: false, bcmaRequired: true, iTraceRequired: true },
+  diltiazem: { independentDoubleCheckRequired: false, bcmaRequired: true, iTraceRequired: true },
+  fentanyl: { independentDoubleCheckRequired: true, bcmaRequired: true, iTraceRequired: true },
 }
 
 /**

@@ -1,5 +1,8 @@
 /**
- * CP 4-156 Attachment B — vasoactive/inotrope subset, typed.
+ * CP 4-156 Attachment B — vasoactive/inotrope subset, typed, plus Phase 19e's
+ * non-vasoactive additions (fentanyl, dexmedetomidine, diltiazem) — Attachment B is a
+ * full ~30-drug institutional IV-titration table, not vasoactive-specific, and CP 4-156
+ * itself governs "Intravenous Medications" generally (see docs/CLINICAL_SPEC.md).
  *
  * Values are cross-checked against `docs/references/CP4-156 Attachment B.pdf` (reviewed
  * 6/23/2022) and apply "unless defined by prescriber" (see CLAUDE.md source-of-truth order).
@@ -8,7 +11,9 @@
  *
  * Vasopressin models the SHOCK indication only (the scenario this simulator targets).
  * Attachment B also has a GI-hemorrhage row (0.2 units/min, titrate 0.2 unit/min q1h,
- * max 0.8 unit/min) — out of scope and intentionally not modeled.
+ * max 0.8 unit/min) — out of scope and intentionally not modeled. Fentanyl and
+ * diltiazem's bolus doses are likewise omitted, matching this same convention already
+ * used for vasopressin's shock row.
  */
 import type { DrugDefinition, DrugId } from '../state/types'
 
@@ -109,6 +114,45 @@ export const FORMULARY: Record<DrugId, DrugDefinition> = {
       'Urine specific gravity',
       'Urine and serum osmolality',
     ],
+  },
+  fentanyl: {
+    id: 'fentanyl',
+    name: 'Fentanyl',
+    genericName: 'Sublimaze',
+    concentration: { amount: 1000, amountUnit: 'mcg', volumeMl: 100 },
+    unit: 'mcg/hr',
+    weightBased: false,
+    startDose: 25,
+    titrationIncrement: 10,
+    titrationInterval: { minMinutes: 10 },
+    maxDose: 150,
+    monitoring: ['Respiratory status', 'Cardiovascular status', 'BP', 'HR', 'Pain score'],
+  },
+  dexmedetomidine: {
+    id: 'dexmedetomidine',
+    name: 'Dexmedetomidine',
+    genericName: 'Precedex',
+    concentration: { amount: 200, amountUnit: 'mcg', volumeMl: 250 },
+    unit: 'mcg/kg/hr',
+    weightBased: true,
+    startDose: 0.2,
+    titrationIncrement: 0.1,
+    titrationInterval: { minMinutes: 30 },
+    maxDose: 0.7,
+    monitoring: ['RASS', 'HR', 'Respiration', 'Rhythm'],
+  },
+  diltiazem: {
+    id: 'diltiazem',
+    name: 'Diltiazem',
+    genericName: 'Cardizem',
+    concentration: { amount: 125, amountUnit: 'mg', volumeMl: 125 },
+    unit: 'mg/hr',
+    weightBased: false,
+    startDose: 5,
+    titrationIncrement: 5,
+    titrationInterval: { minMinutes: 15 },
+    maxDose: 15,
+    monitoring: ['BP', 'HR', 'EKG'],
   },
 }
 

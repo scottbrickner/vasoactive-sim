@@ -3,11 +3,13 @@ import { Panel } from '../design/primitives'
 import { getDrug } from '../data/formulary'
 import { vitalsAtMinute, type VitalsHistoryPoint } from '../engine/vitalsAtMinute'
 import { formatClock } from '../lib/time'
-import type { LogEntry } from '../state/types'
+import type { LogEntry, Order } from '../state/types'
 
 export interface TitrationVitalsHistoryProps {
   log: LogEntry[]
   vitalsHistory: VitalsHistoryPoint[]
+  /** Gates the conditional RASS/painScore columns below — shown only when some order in the session actually targets them. */
+  orders: Order[]
 }
 
 /**
@@ -20,11 +22,13 @@ export interface TitrationVitalsHistoryProps {
  * no "guided"/batching language anywhere in the UI. Collapsed by default (a long
  * session can have many rows); the toggle label names the real count.
  */
-export function TitrationVitalsHistory({ log, vitalsHistory }: TitrationVitalsHistoryProps) {
+export function TitrationVitalsHistory({ log, vitalsHistory, orders }: TitrationVitalsHistoryProps) {
   const [open, setOpen] = useState(false)
   const entries = log
     .filter((e) => e.type === 'action' && e.doseAction != null && e.outcome === 'applied')
     .sort((a, b) => a.minute - b.minute)
+  const showRass = orders.some((o) => o.target.metric === 'RASS')
+  const showPainScore = orders.some((o) => o.target.metric === 'painScore')
 
   return (
     <Panel title="Titration & vitals history" subtitle="Every real titration this session, with the vitals in effect at that moment.">
@@ -52,6 +56,8 @@ export function TitrationVitalsHistory({ log, vitalsHistory }: TitrationVitalsHi
                   <th className="py-1.5 pr-3">MAP</th>
                   <th className="py-1.5 pr-3">HR</th>
                   <th className="py-1.5 pr-3">SpO2</th>
+                  {showRass && <th className="py-1.5 pr-3">RASS</th>}
+                  {showPainScore && <th className="py-1.5 pr-3">Pain score</th>}
                 </tr>
               </thead>
               <tbody>
@@ -68,6 +74,10 @@ export function TitrationVitalsHistory({ log, vitalsHistory }: TitrationVitalsHi
                       <td className="py-1.5 pr-3 font-mono text-ink">{vitals ? vitals.map : '—'}</td>
                       <td className="py-1.5 pr-3 font-mono text-ink">{vitals ? vitals.hr : '—'}</td>
                       <td className="py-1.5 pr-3 font-mono text-ink">{vitals ? vitals.spo2 : '—'}</td>
+                      {showRass && <td className="py-1.5 pr-3 font-mono text-ink">{vitals ? vitals.rass : '—'}</td>}
+                      {showPainScore && (
+                        <td className="py-1.5 pr-3 font-mono text-ink">{vitals ? vitals.painScore : '—'}</td>
+                      )}
                     </tr>
                   )
                 })}

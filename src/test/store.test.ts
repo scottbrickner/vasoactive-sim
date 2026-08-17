@@ -2,7 +2,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { priorAgentsWeaned, useSimStore } from '../state/store'
 import { autoEarlyNotificationDecisionPointId } from '../engine/decisionPoints'
 import { scoreSession } from '../engine/scoring'
-import { DEFAULT_SCENARIO } from '../data/scenarios'
+import {
+  DEFAULT_SCENARIO,
+  SINGLE_AGENT_EARLY_NOTIFICATION,
+  SEQUENTIAL_PRESSOR_ESCALATION,
+  WEANING_SUPPORT,
+  ANALGOSEDATION,
+  DILTIAZEM_RATE_CONTROL,
+} from '../data/scenarios'
+import type { DecisionPoint } from '../state/types'
 
 const NOREPI_ORDER_ID = 'order-norepinephrine-agent1'
 const VASOPRESSIN_ORDER_ID = 'order-vasopressin-agent2'
@@ -47,7 +55,7 @@ describe('store — initiation', () => {
     expect(norepiInfusion().status).toBe('infusing')
     expect(norepiInfusion().rate).toBe(0.5)
     expect(norepiInfusion().lastActionMinute).toBe(0)
-    expect(state.lastPhysiologyUpdate).toEqual({ minute: 0, map: 57, hr: 118, spo2: 96 })
+    expect(state.lastPhysiologyUpdate).toEqual({ minute: 0, map: 57, hr: 118, spo2: 96, rass: 0, painScore: 0 })
     expect(state.feedback).toMatchObject({ tone: 'success', title: 'Infusion started' })
     const marEntry = state.log.find((e) => e.type === 'documentation' && e.location === 'MAR' && /Initial rate/.test(e.summary))
     expect(marEntry).toBeDefined()
@@ -114,6 +122,10 @@ describe('store — titration mechanics', () => {
   })
 
   it('blocks a dose above the Guardrails hard limit (the drug maximum) regardless of order status', () => {
+    // Phase 19g authored a real escalationAttempt decision point on this exact order/
+    // trigger (neutropenic-septic-shock-escalation) — mark it already shown so this
+    // unrelated test keeps exercising the routine toast, not the decision card.
+    useSimStore.setState((s) => ({ decisionPointsShown: { ...s.decisionPointsShown, 'neutropenic-septic-shock-escalation': true } }))
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 999)
     expect(norepiInfusion().rate).toBe(0.5)
     expect(useSimStore.getState().feedback).toMatchObject({ tone: 'danger', title: 'Blocked by Guardrails' })
@@ -231,10 +243,14 @@ describe('store — training/validation mode override flow', () => {
   })
 
   it('needs-provider is a hard stop in both modes, never deferred', () => {
+    // Phase 19g authored a real escalationAttempt decision point on this exact order
+    // (neutropenic-septic-shock-escalation) — mark it already shown so this unrelated
+    // test keeps exercising the routine toast, not the decision card.
     useSimStore.setState((s) => ({
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 25, lastActionMinute: 0 } : i)),
       orders: s.orders.map((o) => (o.id === NOREPI_ORDER_ID ? { ...o, maxDose: 25 } : o)),
       clockMinutes: 3,
+      decisionPointsShown: { ...s.decisionPointsShown, 'neutropenic-septic-shock-escalation': true },
     }))
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 26)
     expect(useSimStore.getState().pendingOverride).toBeNull()
@@ -467,6 +483,11 @@ describe('store — max dose and provider notification', () => {
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 30, lastActionMinute: 100 } : i)),
     }))
     useSimStore.setState({ clockMinutes: 103 })
+    // Phase 19g authored a real escalationAttempt decision point on this exact order
+    // (neutropenic-septic-shock-escalation) — mark it already shown so these tests keep
+    // exercising the routine toasts, not the decision card (that mechanism is covered by
+    // its own describe block below and by decisionPoints.test.ts).
+    useSimStore.setState((s) => ({ decisionPointsShown: { ...s.decisionPointsShown, 'neutropenic-septic-shock-escalation': true } }))
   })
 
   it('blocks a dose above the Guardrails hard limit regardless of target status (order max === drug max here)', () => {
@@ -553,7 +574,7 @@ describe('store — physiology wiring', () => {
   it('advanceClock moves MAP toward the projected total once the response lag has fully elapsed', () => {
     useSimStore.setState((s) => ({
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
-      lastPhysiologyUpdate: { minute: 0, map: 57, hr: 118, spo2: 96 },
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: 118, spo2: 96, rass: 0, painScore: 0 },
     }))
     useSimStore.getState().advanceClock(5) // scenario response lag is 2-5 min
     const state = useSimStore.getState()
@@ -564,7 +585,7 @@ describe('store — physiology wiring', () => {
   it('leaves MAP unmoved before the response lag has begun', () => {
     useSimStore.setState((s) => ({
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
-      lastPhysiologyUpdate: { minute: 0, map: 57, hr: 118, spo2: 96 },
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: 118, spo2: 96, rass: 0, painScore: 0 },
     }))
     useSimStore.getState().advanceClock(1) // before minMinutes (2)
     expect(useSimStore.getState().vitals.map).toBe(57)
@@ -588,7 +609,7 @@ describe('store — physiology wiring', () => {
           rateBeforePause: null,
         },
       ],
-      lastPhysiologyUpdate: { minute: 0, map: 63, hr: 118, spo2: 96 },
+      lastPhysiologyUpdate: { minute: 0, map: 63, hr: 118, spo2: 96, rass: 0, painScore: 0 },
     }))
     useSimStore.getState().advanceClock(5)
     expect(useSimStore.getState().vitals.map).toBeGreaterThanOrEqual(65)
@@ -599,7 +620,7 @@ describe('store — physiology wiring', () => {
     const startingPulsePressure = startingVitals.sbp - startingVitals.dbp
     useSimStore.setState((s) => ({
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
-      lastPhysiologyUpdate: { minute: 0, map: 57, hr: 118, spo2: 96 },
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: 118, spo2: 96, rass: 0, painScore: 0 },
     }))
     useSimStore.getState().advanceClock(5) // MAP moves from 57 to 63 (norepi alone)
     const { sbp, dbp, map } = useSimStore.getState().vitals
@@ -614,7 +635,7 @@ describe('store — physiology wiring', () => {
     const startingSpo2 = useSimStore.getState().scenario.startingVitals.spo2
     useSimStore.setState((s) => ({
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
-      lastPhysiologyUpdate: { minute: 0, map: 57, hr: startingHr, spo2: startingSpo2 },
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: startingHr, spo2: startingSpo2, rass: 0, painScore: 0 },
     }))
     useSimStore.getState().advanceClock(5) // fully past the response lag (2-5 min)
     const { hr, spo2 } = useSimStore.getState().vitals
@@ -631,7 +652,7 @@ describe('store — physiology wiring', () => {
     const startingSpo2 = useSimStore.getState().scenario.startingVitals.spo2
     useSimStore.setState((s) => ({
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
-      lastPhysiologyUpdate: { minute: 0, map: 57, hr: startingHr, spo2: startingSpo2 },
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: startingHr, spo2: startingSpo2, rass: 0, painScore: 0 },
     }))
     useSimStore.getState().advanceClock(1) // before minMinutes (2)
     expect(useSimStore.getState().vitals.spo2).toBe(startingSpo2)
@@ -651,7 +672,7 @@ describe('store — physiology wiring', () => {
         },
       },
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30 } : i)),
-      lastPhysiologyUpdate: { minute: 0, map: 57, hr: startingHr, spo2: startingSpo2 },
+      lastPhysiologyUpdate: { minute: 0, map: 57, hr: startingHr, spo2: startingSpo2, rass: 0, painScore: 0 },
     }))
     useSimStore.getState().advanceClock(5)
     // SpO2 is jitter-free, so with zero contribution it lands exactly on baseline.
@@ -661,7 +682,7 @@ describe('store — physiology wiring', () => {
   it('forceImprove/forceWorsen preserve the HR/SpO2 anchor, only touching MAP', () => {
     useSimStore.setState((s) => ({
       infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 15 } : i)),
-      lastPhysiologyUpdate: { minute: 0, map: 60, hr: 110, spo2: 97 },
+      lastPhysiologyUpdate: { minute: 0, map: 60, hr: 110, spo2: 97, rass: 0, painScore: 0 },
       deteriorationOffset: 4,
     }))
     useSimStore.getState().forceImprove(2)
@@ -807,6 +828,10 @@ describe('store — Block of Charting', () => {
   })
 
   it('still blocks a dose above the Guardrails hard limit even under an active block', () => {
+    // Phase 19g authored a real escalationAttempt decision point on this exact order
+    // (neutropenic-septic-shock-escalation) — mark it already shown so this unrelated
+    // test keeps exercising the routine toast, not the decision card.
+    useSimStore.setState((s) => ({ decisionPointsShown: { ...s.decisionPointsShown, 'neutropenic-septic-shock-escalation': true } }))
     useSimStore.getState().declareBlockOfCharting(NOREPI_ORDER_ID)
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 999)
     expect(norepiInfusion().rate).toBe(0.5)
@@ -1020,6 +1045,52 @@ describe('store — wean-order gating on titrate', () => {
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 10.5) // up from 10
     expect(useSimStore.getState().pendingOverride).toBeNull()
     expect(norepiInfusion().rate).toBe(10.5)
+  })
+})
+
+// runMultiStepTitration bidirectional — added after a user-reported bug: the mechanic
+// was originally up-only and silently couldn't help a learner weaning a pressor DOWN
+// (weaningSupport scenario's whole teaching point). Reuses seedTwoAgentWeanOrder, the
+// same weanOrder fixture pattern the tests above already establish.
+describe('store — runMultiStepTitration (downward/weaning plans)', () => {
+  it('refuses to run a downward plan before the lower-weanOrder agent is cleared — no steps applied, infusion unchanged, clear feedback', () => {
+    seedTwoAgentWeanOrder(0.03) // vasopressin still above its own startDose (0.02)
+    useSimStore.getState().runMultiStepTitration(NOREPI_ORDER_ID, 8)
+    const state = useSimStore.getState()
+    expect(norepiInfusion().rate).toBe(10)
+    expect(state.log.some((e) => e.autoGeneratedByMultiStep)).toBe(false)
+    expect(state.feedback?.tone).toBe('danger')
+  })
+
+  it('applies a downward plan once the lower-weanOrder agent is cleared, floored at this order\'s own startDose (not 0)', () => {
+    seedTwoAgentWeanOrder(0.02) // vasopressin already cleared
+    useSimStore.getState().runMultiStepTitration(NOREPI_ORDER_ID, 0) // asks for 0 — should floor at startDose 0.5
+    const state = useSimStore.getState()
+    expect(norepiInfusion().rate).toBe(0.5)
+    const doseEntries = state.log.filter((e) => e.autoGeneratedByMultiStep && e.doseAction === 'titrate')
+    expect(doseEntries.length).toBeGreaterThan(1)
+    expect(doseEntries[doseEntries.length - 1].dose).toBe(0.5)
+  })
+
+  it('does not early-break on the meetsTarget check — multiple downward steps apply even though target is met throughout', () => {
+    seedTwoAgentWeanOrder(0.02)
+    useSimStore.setState((s) => ({ vitals: { ...s.vitals, map: 90 } })) // well above target the whole plan
+    useSimStore.getState().runMultiStepTitration(NOREPI_ORDER_ID, 8.5)
+    const doseEntries = useSimStore.getState().log.filter((e) => e.autoGeneratedByMultiStep && e.doseAction === 'titrate')
+    expect(doseEntries.map((e) => e.dose)).toEqual([9.5, 9, 8.5])
+    expect(norepiInfusion().rate).toBe(8.5)
+  })
+
+  it("applyPacingTrigger threads direction — a manual down-titration eventually offers a downward pendingPacingOffer naming the order's own startDose", () => {
+    seedTwoAgentWeanOrder(0.02) // vasopressin already cleared, so norepi can down-titrate freely
+    useSimStore.setState({ clockMinutes: 30 })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9.5) // 1st down-titration
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9) // 2nd
+    expect(useSimStore.getState().pendingPacingOffer).toBeNull()
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 8.5) // 3rd -> pacing offer opens
+    const offer = useSimStore.getState().pendingPacingOffer
+    expect(offer).toMatchObject({ orderId: NOREPI_ORDER_ID, currentDose: 8.5, nextDecisionDose: 0.5 })
+    expect(offer?.nextDecisionLabel).toMatch(/starting dose/)
   })
 })
 
@@ -1375,11 +1446,951 @@ describe('store — Phase 18 decision points (neutropenicSepticShock)', () => {
         infusions: s.infusions,
         log: s.log,
         verificationFlags: s.verificationFlags,
+        independentCheckFlags: s.independentCheckFlags,
         adherenceFlags: s.adherenceFlags,
         blockOfChartingHistory: s.blockOfChartingHistory,
       })
       const judgment = card.categories.find((c) => c.key === 'clinicalJudgment')!
       expect(judgment.status).toBe('met')
+    })
+  })
+
+  describe('escalation decision point (norepinephrine at its ceiling — Phase 19g)', () => {
+    beforeEach(() => {
+      useSimStore.getState().completeBeginBag(norepiInfusion().id)
+      useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+      useSimStore.setState((s) => ({
+        infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 30, lastActionMinute: 100 } : i)),
+        clockMinutes: 103,
+      }))
+      useSimStore.getState().submitDose(NOREPI_ORDER_ID, 31) // above drug max (30) -> hardLimitBlocked, fires the real authored point
+    })
+
+    it('opens the real authored escalation decision point instead of the routine toast', () => {
+      const state = useSimStore.getState()
+      expect(state.pendingDecisionPoint).toEqual({ decisionPointId: 'neutropenic-septic-shock-escalation' })
+      expect(state.feedback?.title).not.toBe('Blocked by Guardrails')
+    })
+
+    it('"notify the provider" derives good tone via the real notifyProvider effect', () => {
+      useSimStore.getState().chooseDecisionOption('notify-provider')
+      const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'notify-provider')!
+      expect(marker.decisionTone).toBe('good')
+      expect(useSimStore.getState().log.some((e) => e.isProviderNotification)).toBe(true)
+    })
+
+    it('"chart vitals and reassess" derives good tone via the real chartVitals effect', () => {
+      useSimStore.getState().chooseDecisionOption('chart-and-reassess')
+      const state = useSimStore.getState()
+      const marker = state.log.find((e) => e.decisionOptionId === 'chart-and-reassess')!
+      expect(marker.decisionTone).toBe('good')
+      expect(state.log.some((e) => e.type === 'documentation' && e.location === 'iView')).toBe(true)
+    })
+
+    it('"discontinue norepinephrine" is manualTone critical (none effect), infusion untouched — the one gap+none option that IS correctly critical', () => {
+      const infusionsBefore = useSimStore.getState().infusions
+      useSimStore.getState().chooseDecisionOption('discontinue-norepinephrine')
+      const state = useSimStore.getState()
+      const marker = state.log.find((e) => e.decisionOptionId === 'discontinue-norepinephrine')!
+      expect(marker.decisionTone).toBe('critical')
+      expect(state.infusions).toEqual(infusionsBefore)
+    })
+  })
+})
+
+describe('store — Phase 19c escalationAttempt decision-point trigger', () => {
+  const ESCALATION_DP_ID = 'test-escalation-norepi'
+
+  function escalationDecisionPoint(): DecisionPoint {
+    return {
+      id: ESCALATION_DP_ID,
+      trapType: 'doseCeiling',
+      trigger: { kind: 'escalationAttempt', orderId: NOREPI_ORDER_ID },
+      situation: "You've hit norepinephrine's ceiling with target still unmet. What's your next move?",
+      policyHint: 'CP 4-156: notify the provider rather than exceed the order.',
+      options: [
+        {
+          id: 'notify',
+          label: 'Notify provider',
+          caption: 'Document the assessment and await further orders.',
+          group: 'covered',
+          effect: { kind: 'notifyProvider', orderId: NOREPI_ORDER_ID },
+          feedback: { text: 'Correct — notify the provider rather than push past the ceiling.' },
+        },
+      ],
+    }
+  }
+
+  // Phase 19g authored a REAL escalationAttempt decision point on this exact order
+  // (neutropenic-septic-shock-escalation, in the scenario file itself) — strip it out of
+  // the scenario before each test below so these generic-mechanism tests keep exercising
+  // exactly what they're named for (a synthetic decision point the test itself controls,
+  // or the true "nothing authored" case), independent of whatever the flagship happens to
+  // author. The flagship's own real point gets its own dedicated coverage further down.
+  beforeEach(() => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    // Seed norepi at its ordered maximum (30), matching the existing "max dose and
+    // provider notification" describe block's own setup.
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 30, lastActionMinute: 100 } : i)),
+      clockMinutes: 103,
+      scenario: {
+        ...s.scenario,
+        decisionPoints: (s.scenario.decisionPoints ?? []).filter(
+          (d) => !(d.trigger.kind === 'escalationAttempt' && d.trigger.orderId === NOREPI_ORDER_ID),
+        ),
+      },
+    }))
+  })
+
+  it('fires from the hardLimitBlocked branch when a matching decision point exists, instead of the routine "Blocked by Guardrails" toast', () => {
+    useSimStore.setState((s) => ({
+      scenario: { ...s.scenario, decisionPoints: [...(s.scenario.decisionPoints ?? []), escalationDecisionPoint()] },
+    }))
+    const entry = useSimStore.getState().submitDose(NOREPI_ORDER_ID, 31) // above drug max (30) -> hardLimitBlocked
+    const state = useSimStore.getState()
+    expect(entry?.outcome).toBe('hardLimitBlocked')
+    expect(state.pendingDecisionPoint).toEqual({ decisionPointId: ESCALATION_DP_ID })
+    expect(state.feedback?.title).not.toBe('Blocked by Guardrails')
+    expect(norepiInfusion().rate).toBe(30) // never applied
+  })
+
+  it('fires from the needs-provider branch when a matching decision point exists, instead of the routine "Notify the provider" toast', () => {
+    useSimStore.setState((s) => ({
+      orders: s.orders.map((o) => (o.id === NOREPI_ORDER_ID ? { ...o, maxDose: 25 } : o)),
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 25 } : i)),
+      scenario: { ...s.scenario, decisionPoints: [...(s.scenario.decisionPoints ?? []), escalationDecisionPoint()] },
+    }))
+    const entry = useSimStore.getState().submitDose(NOREPI_ORDER_ID, 26) // above order max (25), below drug max (30) -> needs-provider
+    const state = useSimStore.getState()
+    expect(entry?.outcome).toBe('needs-provider')
+    expect(state.pendingDecisionPoint).toEqual({ decisionPointId: ESCALATION_DP_ID })
+    expect(state.feedback?.title).not.toBe('Notify the provider')
+  })
+
+  it('does NOT fire when no scenario-authored escalationAttempt decision point exists for this order — the routine toast is unchanged', () => {
+    // beforeEach already stripped the flagship's own real escalation point for this
+    // order — this is the genuine "nothing authored for this trigger" case.
+    const entry = useSimStore.getState().submitDose(NOREPI_ORDER_ID, 31)
+    const state = useSimStore.getState()
+    expect(entry?.outcome).toBe('hardLimitBlocked')
+    expect(state.pendingDecisionPoint).toBeNull()
+    expect(state.feedback).toMatchObject({ tone: 'danger', title: 'Blocked by Guardrails' })
+  })
+
+  it('does not refire once already shown (decisionPointsShown guard) — falls back to the routine toast on a later attempt', () => {
+    useSimStore.setState((s) => ({
+      scenario: { ...s.scenario, decisionPoints: [...(s.scenario.decisionPoints ?? []), escalationDecisionPoint()] },
+    }))
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 31) // fires, opens the decision point
+    expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: ESCALATION_DP_ID })
+    useSimStore.getState().dismissDecisionPoint() // stays marked shown, per every other trigger's precedent
+    const state = useSimStore.getState()
+    expect(state.decisionPointsShown[ESCALATION_DP_ID]).toBe(true)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 32) // attempted again — must not refire
+    const after = useSimStore.getState()
+    expect(after.pendingDecisionPoint).toBeNull()
+    expect(after.feedback).toMatchObject({ tone: 'danger', title: 'Blocked by Guardrails' })
+  })
+})
+
+describe('store — Phase 19d independent double-check gate', () => {
+  const FENTANYL_ORDER_ID = 'order-fentanyl-test'
+  const FENTANYL_INFUSION_ID = 'infusion-fentanyl-test'
+
+  /** A minimal fentanyl order + pre-seeded hanging (Begin-Bag-complete) infusion — real Attachment B values from data/formulary.ts. */
+  function seedFentanylOrder() {
+    useSimStore.setState((s) => ({
+      orders: [
+        ...s.orders,
+        {
+          id: FENTANYL_ORDER_ID,
+          drugId: 'fentanyl',
+          sequence: 1,
+          startDose: 25,
+          maxDose: 150,
+          increment: 10,
+          interval: { minMinutes: 10 },
+          target: { metric: 'painScore', comparator: '<=', value: 4, unit: 'score' },
+        },
+      ],
+      infusions: [
+        ...s.infusions,
+        {
+          id: FENTANYL_INFUSION_ID,
+          orderId: FENTANYL_ORDER_ID,
+          drugId: 'fentanyl',
+          status: 'hanging',
+          rate: 0,
+          initialRate: null,
+          channel: 'B',
+          beginBagCompleted: true,
+          lastActionMinute: null,
+          stoppedAtMinute: null,
+          rateBeforePause: null,
+        },
+      ],
+    }))
+  }
+
+  function fentanylInfusion() {
+    return useSimStore.getState().infusions.find((i) => i.orderId === FENTANYL_ORDER_ID)!
+  }
+
+  it('refuses a fentanyl initiate with no independentCheck opt — returns null, infusion untouched, feedback set', () => {
+    seedFentanylOrder()
+    const entry = useSimStore.getState().submitDose(FENTANYL_ORDER_ID, 25)
+    expect(entry).toBeNull()
+    expect(fentanylInfusion().status).toBe('hanging')
+    expect(fentanylInfusion().rate).toBe(0)
+    expect(useSimStore.getState().feedback).toMatchObject({ tone: 'danger', title: 'Independent double-check required' })
+  })
+
+  it('accepts a fentanyl initiate WITH independentCheck — applies, independentCheckFlags[entry.id] true, secondCheckName/Role stamped on the entry', () => {
+    seedFentanylOrder()
+    const entry = useSimStore
+      .getState()
+      .submitDose(FENTANYL_ORDER_ID, 25, { independentCheck: { secondCheckName: 'Pat Nguyen', secondCheckRole: 'RN' } })
+    expect(entry).not.toBeNull()
+    expect(entry?.outcome).toBe('applied')
+    expect(fentanylInfusion().status).toBe('infusing')
+    expect(fentanylInfusion().rate).toBe(25)
+    const state = useSimStore.getState()
+    expect(state.independentCheckFlags[entry!.id]).toBe(true)
+    expect(entry?.secondCheckName).toBe('Pat Nguyen')
+    expect(entry?.secondCheckRole).toBe('RN')
+  })
+
+  it('never gates ANY vasoactive initiate (confirmed explicitly, not just by omission) — norepinephrine applies with no independentCheck opt and no independentCheckFlags entry', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    const entry = useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    expect(entry).not.toBeNull()
+    expect(entry?.outcome).toBe('applied')
+    expect(useSimStore.getState().independentCheckFlags[entry!.id]).toBeUndefined()
+  })
+
+  it('never gates a titrate, even for fentanyl — the gate is initiate-only, confirmed explicitly', () => {
+    seedFentanylOrder()
+    useSimStore
+      .getState()
+      .submitDose(FENTANYL_ORDER_ID, 25, { independentCheck: { secondCheckName: 'Pat Nguyen', secondCheckRole: 'RN' } })
+    // Target still unmet (painScore 7 > 4) so an up-titration is order-compliant; no
+    // independentCheck opt is passed here at all — titration must not be gated on it.
+    useSimStore.setState((s) => ({ vitals: { ...s.vitals, painScore: 7 } }))
+    const entry = useSimStore.getState().submitDose(FENTANYL_ORDER_ID, 35)
+    expect(entry).not.toBeNull()
+    expect(entry?.outcome).toBe('applied')
+    expect(fentanylInfusion().rate).toBe(35)
+    expect(useSimStore.getState().independentCheckFlags[entry!.id]).toBeUndefined()
+  })
+})
+
+/**
+ * Phase 19g — drift-prevention coverage for every NEW decision point authored across the
+ * other five scenarios (the flagship's own new 3rd point is covered above, alongside its
+ * original Phase 18 two). For every option whose effect is submitDose/submitDoseRelative/
+ * multiStepTitration/notifyProvider, this drives the store to the real triggering state
+ * (never hand-sets pendingDecisionPoint) and asserts the REAL derived decisionTone matches
+ * what was intended when authoring the option — the same pattern as the flagship's own
+ * Phase 18 tests above.
+ */
+describe('store — Phase 19g decision-point bank (other five scenarios)', () => {
+  describe('singleAgentEarlyNotification', () => {
+    const SA_ORDER_ID = 'order-norepinephrine-sa'
+
+    beforeEach(() => {
+      useSimStore.getState().startScenario(SINGLE_AGENT_EARLY_NOTIFICATION, 'training')
+      useSimStore.setState({ phase: 'sim' })
+    })
+
+    function saInfusion() {
+      return useSimStore.getState().infusions.find((i) => i.drugId === 'norepinephrine')!
+    }
+
+    describe('earlyNotification checkpoint', () => {
+      beforeEach(() => {
+        // Direct-seed just below the 30%-of-max (9 mcg/min) checkpoint, target unmet —
+        // mirrors the flagship's own seedBothAgentsInfusing-style direct state seeding.
+        useSimStore.setState((s) => ({
+          infusions: s.infusions.map((i) =>
+            i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 8.5, initialRate: 0.5, beginBagCompleted: true, lastActionMinute: 0 } : i,
+          ),
+          vitals: { ...s.vitals, map: 60 },
+          clockMinutes: 10,
+        }))
+        useSimStore.getState().submitDose(SA_ORDER_ID, 9) // crosses the 9 mcg/min checkpoint
+      })
+
+      it('opens the real authored checkpoint decision point', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'single-agent-early-notification-checkpoint' })
+      })
+
+      it('"notify" derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('notify')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'notify')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"continue titrating" derives good tone (multiStepTitration actually moves the rate)', () => {
+        useSimStore.getState().chooseDecisionOption('continue-titrating')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'continue-titrating')!
+        expect(marker.decisionTone).toBe('good')
+        expect(saInfusion().rate).toBeGreaterThan(9)
+      })
+
+      it('"hold for another hour" is manualTone caution (none effect, no infusion side effect)', () => {
+        const rateBefore = saInfusion().rate
+        useSimStore.getState().chooseDecisionOption('hold-an-hour')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'hold-an-hour')!
+        expect(marker.decisionTone).toBe('caution')
+        expect(saInfusion().rate).toBe(rateBefore)
+      })
+    })
+
+    describe('postTitrate documentation', () => {
+      beforeEach(() => {
+        useSimStore.getState().completeBeginBag(saInfusion().id)
+        useSimStore.getState().submitDose(SA_ORDER_ID, 0.5) // initiate
+        useSimStore.getState().submitDose(SA_ORDER_ID, 1) // first-ever titrate -> fires
+      })
+
+      it('opens the real authored documentation decision point', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'single-agent-early-notification-documentation' })
+      })
+
+      it('"chart citing MAP" derives good tone via the real chartVitals effect', () => {
+        useSimStore.getState().chooseDecisionOption('chart-map')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-map')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"chart citing heart rate" is manualTone caution (wrong parameter, none effect)', () => {
+        useSimStore.getState().chooseDecisionOption('chart-hr')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-hr')!
+        expect(marker.decisionTone).toBe('caution')
+      })
+    })
+
+    describe('escalationAttempt ceiling', () => {
+      beforeEach(() => {
+        useSimStore.setState((s) => ({
+          infusions: s.infusions.map((i) =>
+            i.drugId === 'norepinephrine' ? { ...i, status: 'infusing', rate: 30, initialRate: 0.5, beginBagCompleted: true, lastActionMinute: 100 } : i,
+          ),
+          clockMinutes: 103,
+        }))
+        useSimStore.getState().submitDose(SA_ORDER_ID, 31) // hardLimitBlocked -> fires
+      })
+
+      it('opens the real authored escalation decision point instead of the routine toast', () => {
+        const state = useSimStore.getState()
+        expect(state.pendingDecisionPoint).toEqual({ decisionPointId: 'single-agent-early-notification-escalation' })
+        expect(state.feedback?.title).not.toBe('Blocked by Guardrails')
+      })
+
+      it('"notify the provider" derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('notify-provider')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'notify-provider')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"discontinue norepinephrine" is manualTone critical, infusion untouched', () => {
+        const infusionsBefore = useSimStore.getState().infusions
+        useSimStore.getState().chooseDecisionOption('discontinue-norepinephrine')
+        const state = useSimStore.getState()
+        const marker = state.log.find((e) => e.decisionOptionId === 'discontinue-norepinephrine')!
+        expect(marker.decisionTone).toBe('critical')
+        expect(state.infusions).toEqual(infusionsBefore)
+      })
+    })
+  })
+
+  describe('sequentialPressorEscalation', () => {
+    const SPE_NOREPI_ID = 'order-norepinephrine-spe'
+    const SPE_PHENYL_ID = 'order-phenylephrine-spe'
+
+    beforeEach(() => {
+      useSimStore.getState().startScenario(SEQUENTIAL_PRESSOR_ESCALATION, 'training')
+      useSimStore.setState({ phase: 'sim' })
+    })
+
+    function speNorepiInfusion() {
+      return useSimStore.getState().infusions.find((i) => i.drugId === 'norepinephrine')!
+    }
+
+    it('phenylephrine gains earlyNotificationThreshold and both orders gain weanOrder (additive scenario-data change)', () => {
+      const orders = useSimStore.getState().orders
+      const norepi = orders.find((o) => o.id === SPE_NOREPI_ID)!
+      const phenyl = orders.find((o) => o.id === SPE_PHENYL_ID)!
+      expect(phenyl.earlyNotificationThreshold).toBeCloseTo(0.3)
+      expect(norepi.weanOrder).toBe(2)
+      expect(phenyl.weanOrder).toBe(1)
+    })
+
+    describe('postTitrate documentation (norepinephrine)', () => {
+      beforeEach(() => {
+        useSimStore.getState().completeBeginBag(speNorepiInfusion().id)
+        useSimStore.getState().submitDose(SPE_NOREPI_ID, 0.5) // initiate
+        useSimStore.getState().submitDose(SPE_NOREPI_ID, 1) // first-ever titrate -> fires
+      })
+
+      it('opens the real authored documentation decision point', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'sequential-pressor-escalation-documentation' })
+      })
+
+      it('"chart citing MAP" derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('chart-map')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-map')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"chart citing heart rate" is manualTone caution', () => {
+        useSimStore.getState().chooseDecisionOption('chart-hr')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-hr')!
+        expect(marker.decisionTone).toBe('caution')
+      })
+    })
+
+    describe('earlyNotification (phenylephrine)', () => {
+      beforeEach(() => {
+        // Direct-seed phenylephrine active (bypassing its activation gate, same technique
+        // used elsewhere in this file) just below its 30%-of-max (60 mcg/min) checkpoint,
+        // target unmet.
+        useSimStore.setState((s) => ({
+          infusions: [
+            ...s.infusions,
+            {
+              id: 'test-infusion-phenylephrine-spe',
+              orderId: SPE_PHENYL_ID,
+              drugId: 'phenylephrine',
+              status: 'infusing',
+              rate: 50,
+              initialRate: 50,
+              channel: 'B',
+              beginBagCompleted: true,
+              lastActionMinute: 0,
+              stoppedAtMinute: null,
+              rateBeforePause: null,
+            },
+          ],
+          vitals: { ...s.vitals, map: 60 },
+          clockMinutes: 10,
+        }))
+        useSimStore.getState().submitDose(SPE_PHENYL_ID, 75) // crosses the 60 mcg/min checkpoint
+      })
+
+      it('opens the real authored early-notification decision point', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'sequential-pressor-escalation-early-notification' })
+      })
+
+      it('"notify" derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('notify')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'notify')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"continue titrating phenylephrine" derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('continue-titrating')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'continue-titrating')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"hold for another hour" is manualTone caution', () => {
+        useSimStore.getState().chooseDecisionOption('hold-an-hour')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'hold-an-hour')!
+        expect(marker.decisionTone).toBe('caution')
+      })
+    })
+
+    describe('weanEligible (both pressors infusing, target met)', () => {
+      beforeEach(() => {
+        useSimStore.setState((s) => ({
+          infusions: [
+            ...s.infusions.map((i) =>
+              i.drugId === 'norepinephrine'
+                ? ({ ...i, status: 'infusing', rate: 20, initialRate: 0.5, beginBagCompleted: true, lastActionMinute: null } as typeof i)
+                : i,
+            ),
+            {
+              id: 'test-infusion-phenylephrine-spe-2',
+              orderId: SPE_PHENYL_ID,
+              drugId: 'phenylephrine',
+              status: 'infusing',
+              rate: 100,
+              initialRate: 50,
+              channel: 'B',
+              beginBagCompleted: true,
+              // null (never acted) skips the interval check entirely — the point under
+              // test is wean-sequence gating, not interval timing.
+              lastActionMinute: null,
+              stoppedAtMinute: null,
+              rateBeforePause: null,
+            },
+          ],
+          vitals: { ...s.vitals, map: 65 },
+          // MAP is the only metric either order targets here — nulling the physiology
+          // anchor lets it hold exactly at the value just set through this tick (see
+          // advanceClock's `let map = state.vitals.map` fallback), same trick as the
+          // flagship's own weaning test above.
+          lastPhysiologyUpdate: null,
+        }))
+        useSimStore.getState().advanceClock(1)
+      })
+
+      it('opens the real authored weaning decision point', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'sequential-pressor-escalation-weaning' })
+      })
+
+      it('weaning phenylephrine first (correct, weanOrder 1) derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('wean-phenylephrine')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'wean-phenylephrine')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('weaning norepinephrine first (wrong order — phenylephrine not yet cleared) derives critical tone via override apply', () => {
+        useSimStore.getState().chooseDecisionOption('wean-norepinephrine')
+        const state = useSimStore.getState()
+        const marker = state.log.find((e) => e.decisionOptionId === 'wean-norepinephrine')!
+        expect(marker.decisionTone).toBe('critical')
+        const doseEntry = state.log.find((e) => e.orderId === SPE_NOREPI_ID && e.doseAction === 'titrate')!
+        expect(doseEntry.overridden).toBe(true)
+        expect(doseEntry.violations?.wrongWeanOrder).toBe(true)
+      })
+    })
+  })
+
+  describe('weaningSupport', () => {
+    const WS_NOREPI_ID = 'order-norepinephrine-ws'
+    const WS_VASO_ID = 'order-vasopressin-ws'
+    const WS_PHENYL_ID = 'order-phenylephrine-ws'
+
+    beforeEach(() => {
+      useSimStore.getState().startScenario(WEANING_SUPPORT, 'training')
+      useSimStore.setState({ phase: 'sim' })
+    })
+
+    describe('primary weaning-sequence decision point (fires immediately — all three pre-seeded infusing, target already met)', () => {
+      beforeEach(() => {
+        useSimStore.getState().advanceClock(1)
+      })
+
+      it('opens the real authored weaning-sequence decision point', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'weaning-support-weaning-sequence' })
+      })
+
+      it('weaning phenylephrine first (correct, weanOrder 1) derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('wean-phenylephrine')
+        const state = useSimStore.getState()
+        const marker = state.log.find((e) => e.decisionOptionId === 'wean-phenylephrine')!
+        expect(marker.decisionTone).toBe('good')
+        const doseEntry = state.log.find((e) => e.orderId === WS_PHENYL_ID && e.doseAction === 'titrate')!
+        expect(doseEntry.overridden).toBeUndefined()
+      })
+
+      it('weaning vasopressin first (wrong order — phenylephrine not yet cleared) derives critical tone', () => {
+        useSimStore.getState().chooseDecisionOption('wean-vasopressin')
+        const state = useSimStore.getState()
+        const marker = state.log.find((e) => e.decisionOptionId === 'wean-vasopressin')!
+        expect(marker.decisionTone).toBe('critical')
+        const doseEntry = state.log.find((e) => e.orderId === WS_VASO_ID && e.doseAction === 'titrate')!
+        expect(doseEntry.violations?.wrongWeanOrder).toBe(true)
+      })
+
+      it('weaning norepinephrine first (wrong order — neither adjunct cleared) derives critical tone', () => {
+        useSimStore.getState().chooseDecisionOption('wean-norepinephrine')
+        const state = useSimStore.getState()
+        const marker = state.log.find((e) => e.decisionOptionId === 'wean-norepinephrine')!
+        expect(marker.decisionTone).toBe('critical')
+        const doseEntry = state.log.find((e) => e.orderId === WS_NOREPI_ID && e.doseAction === 'titrate')!
+        expect(doseEntry.violations?.wrongWeanOrder).toBe(true)
+      })
+    })
+
+    describe('postTitrate documentation, further down the wean ladder', () => {
+      it('vasopressin: opens its own real authored documentation decision point once cleared to titrate', () => {
+        useSimStore.getState().advanceClock(1) // fires + consumes the primary weaning-sequence point
+        useSimStore.getState().dismissDecisionPoint()
+        useSimStore.setState((s) => ({
+          // Phenylephrine "cleared" (at its own startDose) so vasopressin's down-titrate
+          // is order-compliant, not itself blocked by the wean-order gate.
+          infusions: s.infusions.map((i) => (i.drugId === 'phenylephrine' ? { ...i, rate: 50 } : i)),
+        }))
+        useSimStore.getState().submitDose(WS_VASO_ID, 0.02) // first-ever titrate on this order -> fires
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'weaning-support-documentation-vasopressin' })
+
+        useSimStore.getState().chooseDecisionOption('chart-map')
+        const goodMarker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-map')!
+        expect(goodMarker.decisionTone).toBe('good')
+      })
+
+      it('vasopressin: "chart citing heart rate" is manualTone caution', () => {
+        useSimStore.getState().advanceClock(1)
+        useSimStore.getState().dismissDecisionPoint()
+        useSimStore.setState((s) => ({
+          infusions: s.infusions.map((i) => (i.drugId === 'phenylephrine' ? { ...i, rate: 50 } : i)),
+        }))
+        useSimStore.getState().submitDose(WS_VASO_ID, 0.02)
+        useSimStore.getState().chooseDecisionOption('chart-hr')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-hr')!
+        expect(marker.decisionTone).toBe('caution')
+      })
+
+      it('norepinephrine: opens its own real authored documentation decision point once cleared to titrate', () => {
+        useSimStore.getState().advanceClock(1)
+        useSimStore.getState().dismissDecisionPoint()
+        useSimStore.setState((s) => ({
+          // Both adjuncts "cleared" (at their own startDose) so norepinephrine's
+          // down-titrate is order-compliant.
+          infusions: s.infusions.map((i) => {
+            if (i.drugId === 'phenylephrine') return { ...i, rate: 50 }
+            if (i.drugId === 'vasopressin') return { ...i, rate: 0.02 }
+            return i
+          }),
+        }))
+        useSimStore.getState().submitDose(WS_NOREPI_ID, 14.5) // first-ever titrate on this order -> fires
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'weaning-support-documentation-norepinephrine' })
+
+        useSimStore.getState().chooseDecisionOption('chart-map')
+        const goodMarker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-map')!
+        expect(goodMarker.decisionTone).toBe('good')
+      })
+
+      it('norepinephrine: "chart citing heart rate" is manualTone caution', () => {
+        useSimStore.getState().advanceClock(1)
+        useSimStore.getState().dismissDecisionPoint()
+        useSimStore.setState((s) => ({
+          infusions: s.infusions.map((i) => {
+            if (i.drugId === 'phenylephrine') return { ...i, rate: 50 }
+            if (i.drugId === 'vasopressin') return { ...i, rate: 0.02 }
+            return i
+          }),
+        }))
+        useSimStore.getState().submitDose(WS_NOREPI_ID, 14.5)
+        useSimStore.getState().chooseDecisionOption('chart-hr')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-hr')!
+        expect(marker.decisionTone).toBe('caution')
+      })
+    })
+  })
+
+  describe('analgosedation', () => {
+    const AS_FENTANYL_ID = 'order-fentanyl-as'
+    const AS_DEX_ID = 'order-dexmedetomidine-as'
+
+    beforeEach(() => {
+      useSimStore.getState().startScenario(ANALGOSEDATION, 'training')
+      useSimStore.setState({ phase: 'sim' })
+    })
+
+    function asFentanylInfusion() {
+      return useSimStore.getState().infusions.find((i) => i.drugId === 'fentanyl')!
+    }
+
+    it('dexmedetomidine gains earlyNotificationThreshold (additive scenario-data change)', () => {
+      const dexOrder = useSimStore.getState().orders.find((o) => o.id === AS_DEX_ID)!
+      expect(dexOrder.earlyNotificationThreshold).toBeCloseTo(0.5)
+    })
+
+    describe('postTitrate documentation (fentanyl)', () => {
+      beforeEach(() => {
+        useSimStore.getState().completeBeginBag(asFentanylInfusion().id)
+        useSimStore.getState().submitDose(AS_FENTANYL_ID, 25, { independentCheck: { secondCheckName: 'Test Nurse', secondCheckRole: 'RN' } }) // initiate
+        useSimStore.getState().submitDose(AS_FENTANYL_ID, 35) // first-ever titrate -> fires
+      })
+
+      it('opens the real authored documentation decision point', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'analgosedation-fentanyl-documentation' })
+      })
+
+      it('"chart citing pain score" derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('chart-pain-score')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-pain-score')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"chart citing RASS" is manualTone critical (drug/parameter mix-up)', () => {
+        useSimStore.getState().chooseDecisionOption('chart-rass')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-rass')!
+        expect(marker.decisionTone).toBe('critical')
+      })
+    })
+
+    describe('earlyNotification (dexmedetomidine)', () => {
+      beforeEach(() => {
+        // Direct-seed dexmedetomidine active (bypassing its activation gate) just below
+        // its 50%-of-max (0.35 mcg/kg/hr) checkpoint, RASS still outside goal.
+        useSimStore.setState((s) => ({
+          infusions: [
+            ...s.infusions,
+            {
+              id: 'test-infusion-dex-as',
+              orderId: AS_DEX_ID,
+              drugId: 'dexmedetomidine',
+              status: 'infusing',
+              rate: 0.3,
+              initialRate: 0.2,
+              channel: 'B',
+              beginBagCompleted: true,
+              lastActionMinute: 0,
+              stoppedAtMinute: null,
+              rateBeforePause: null,
+            },
+          ],
+          vitals: { ...s.vitals, rass: 2 },
+          clockMinutes: 40,
+        }))
+        useSimStore.getState().submitDose(AS_DEX_ID, 0.4) // crosses the 0.35 checkpoint
+      })
+
+      it('opens the real authored early-notification decision point', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'analgosedation-dexmedetomidine-early-notification' })
+      })
+
+      it('"notify" derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('notify')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'notify')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"increase fentanyl instead" derives a non-good (critical) tone — the wrong drug for a RASS concern, not accidentally good', () => {
+        useSimStore.getState().chooseDecisionOption('increase-fentanyl')
+        const state = useSimStore.getState()
+        const marker = state.log.find((e) => e.decisionOptionId === 'increase-fentanyl')!
+        expect(marker.decisionTone).toBe('critical')
+        // Fentanyl was never initiated in this test — confirms the dose genuinely never
+        // applied (200 exceeds its own ordered max outright, and/or the independent-check
+        // gate refuses it), it isn't "coincidentally good" via some other path.
+        expect(asFentanylInfusion().status).toBe('hanging')
+        expect(asFentanylInfusion().rate).toBe(0)
+      })
+
+      it('"hold for another hour" is manualTone caution', () => {
+        useSimStore.getState().chooseDecisionOption('hold-an-hour')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'hold-an-hour')!
+        expect(marker.decisionTone).toBe('caution')
+      })
+    })
+
+    describe('weanEligible (exercises the 19a allTargetsMet fix — both painScore AND RASS independently met)', () => {
+      beforeEach(() => {
+        useSimStore.getState().completeBeginBag(asFentanylInfusion().id)
+        // Real initiate first, so lastPhysiologyUpdate gets a proper (non-null) anchor —
+        // needed because HR/RASS/painScore (unlike MAP) reset to the scenario's ORIGINAL
+        // startingVitals when the anchor is null, unlike MAP's own `state.vitals.map`
+        // fallback (see advanceClock in state/store.ts).
+        useSimStore.getState().submitDose(AS_FENTANYL_ID, 25, { independentCheck: { secondCheckName: 'Test Nurse', secondCheckRole: 'RN' } })
+        useSimStore.setState((s) => ({
+          infusions: [
+            ...s.infusions.map((i) => (i.drugId === 'fentanyl' ? { ...i, rate: 100 } : i)),
+            {
+              id: 'test-infusion-dex-as-2',
+              orderId: AS_DEX_ID,
+              drugId: 'dexmedetomidine',
+              status: 'infusing',
+              rate: 0.5,
+              initialRate: 0.2,
+              channel: 'B',
+              beginBagCompleted: true,
+              // null (never acted) skips the interval check entirely — the point under
+              // test is wean-sequence gating, not interval timing.
+              lastActionMinute: null,
+              stoppedAtMinute: null,
+              rateBeforePause: null,
+            },
+          ],
+        }))
+        // Elapsed >= the scenario's max response lag (5 min) forces full convergence
+        // (responseFraction === 1), so the resulting painScore/RASS are the REAL projected
+        // values from the rates just set above — fentanyl 100 mcg/hr closes the pain gap
+        // (painScore <= 4), dexmedetomidine 0.5 mcg/kg/hr brings RASS into -2..0.
+        useSimStore.getState().advanceClock(5)
+      })
+
+      it('painScore and RASS are both independently met at this point', () => {
+        const vitals = useSimStore.getState().vitals
+        expect(vitals.painScore).toBeLessThanOrEqual(4)
+        expect(vitals.rass).toBeGreaterThanOrEqual(-2)
+        expect(vitals.rass).toBeLessThanOrEqual(0)
+      })
+
+      it('opens the real authored weaning decision point', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'analgosedation-weaning' })
+      })
+
+      it('weaning dexmedetomidine first (correct, weanOrder 1 — sedation before analgesia) derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('wean-dexmedetomidine')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'wean-dexmedetomidine')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('weaning fentanyl first (wrong order — dexmedetomidine not yet cleared) derives critical tone', () => {
+        useSimStore.getState().chooseDecisionOption('wean-fentanyl')
+        const state = useSimStore.getState()
+        const marker = state.log.find((e) => e.decisionOptionId === 'wean-fentanyl')!
+        expect(marker.decisionTone).toBe('critical')
+        const doseEntry = state.log.find((e) => e.orderId === AS_FENTANYL_ID && e.doseAction === 'titrate')!
+        expect(doseEntry.violations?.wrongWeanOrder).toBe(true)
+      })
+    })
+  })
+
+  describe('diltiazemRateControl', () => {
+    const DZ_ORDER_ID = 'order-diltiazem-rc'
+
+    beforeEach(() => {
+      useSimStore.getState().startScenario(DILTIAZEM_RATE_CONTROL, 'training')
+      useSimStore.setState({ phase: 'sim' })
+    })
+
+    function dzInfusion() {
+      return useSimStore.getState().infusions.find((i) => i.drugId === 'diltiazem')!
+    }
+
+    it('gains earlyNotificationThreshold (additive scenario-data change)', () => {
+      const order = useSimStore.getState().orders.find((o) => o.id === DZ_ORDER_ID)!
+      expect(order.earlyNotificationThreshold).toBeCloseTo(0.5)
+    })
+
+    // The scenario file's own DECISION_POINTS doc comment explains why early-notification
+    // is listed BEFORE documentation and why the threshold (0.5 -> 7.5) is tuned to cross
+    // on the FIRST titrate step (5 -> 10) rather than the second: with only two titratable
+    // steps total, crossing on the second (10 -> 15) would coincide exactly with the
+    // ordered maximum, leaving the "continue titrating" option nothing left to apply.
+    describe("earlyNotification (fires on the order's first titrate step, 5 -> 10 mg/hr, winning the race over the documentation point)", () => {
+      beforeEach(() => {
+        useSimStore.getState().completeBeginBag(dzInfusion().id)
+        useSimStore.getState().submitDose(DZ_ORDER_ID, 5) // initiate
+        useSimStore.setState((s) => ({ vitals: { ...s.vitals, hr: 110 } })) // still outside 60-100, unmet
+        useSimStore.getState().submitDose(DZ_ORDER_ID, 10) // first-ever titrate -> crosses the 7.5 checkpoint
+      })
+
+      it('opens the real authored early-notification decision point, not the documentation one', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'diltiazem-rate-control-early-notification' })
+      })
+
+      it('"notify" derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('notify')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'notify')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"continue titrating toward the ordered maximum" derives good tone — genuine headroom remains (10 -> 15)', () => {
+        useSimStore.getState().chooseDecisionOption('continue-titrating')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'continue-titrating')!
+        expect(marker.decisionTone).toBe('good')
+        expect(dzInfusion().rate).toBe(15)
+      })
+
+      it('"hold for another hour" is manualTone caution', () => {
+        useSimStore.getState().chooseDecisionOption('hold-an-hour')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'hold-an-hour')!
+        expect(marker.decisionTone).toBe('caution')
+      })
+    })
+
+    describe("postTitrate documentation (fires on the order's second titrate step, 10 -> 15 mg/hr, once the first step has already consumed the early-notification point)", () => {
+      beforeEach(() => {
+        useSimStore.getState().completeBeginBag(dzInfusion().id)
+        useSimStore.getState().submitDose(DZ_ORDER_ID, 5) // initiate
+        useSimStore.getState().submitDose(DZ_ORDER_ID, 10) // first titrate -> consumes the early-notification point
+        useSimStore.getState().dismissDecisionPoint()
+        useSimStore.getState().submitDose(DZ_ORDER_ID, 15) // second titrate -> fires the documentation point
+      })
+
+      it('opens the real authored documentation decision point', () => {
+        expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'diltiazem-rate-control-documentation' })
+      })
+
+      it('"chart citing HR and rhythm" derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('chart-hr-rhythm')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-hr-rhythm')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"chart citing MAP only" is manualTone caution (incomplete emphasis, not dangerous)', () => {
+        useSimStore.getState().chooseDecisionOption('chart-map-only')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'chart-map-only')!
+        expect(marker.decisionTone).toBe('caution')
+      })
+    })
+
+    describe('escalationAttempt ceiling (the plan\'s explicitly-called-out "check the EKG first" case)', () => {
+      beforeEach(() => {
+        useSimStore.setState((s) => ({
+          infusions: s.infusions.map((i) =>
+            i.drugId === 'diltiazem' ? { ...i, status: 'infusing', rate: 15, initialRate: 5, beginBagCompleted: true, lastActionMinute: 100 } : i,
+          ),
+          clockMinutes: 103,
+        }))
+        useSimStore.getState().submitDose(DZ_ORDER_ID, 20) // above drug max (15) -> hardLimitBlocked, fires
+      })
+
+      it('opens the real authored escalation decision point instead of the routine toast', () => {
+        const state = useSimStore.getState()
+        expect(state.pendingDecisionPoint).toEqual({ decisionPointId: 'diltiazem-rate-control-escalation' })
+        expect(state.feedback?.title).not.toBe('Blocked by Guardrails')
+      })
+
+      it('"notify the provider" derives good tone', () => {
+        useSimStore.getState().chooseDecisionOption('notify-provider')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'notify-provider')!
+        expect(marker.decisionTone).toBe('good')
+      })
+
+      it('"check the EKG first" is manualTone CAUTION, not critical — the plan\'s specifically-checked counter-example', () => {
+        const dp = useSimStore.getState().scenario.decisionPoints!.find((d) => d.id === 'diltiazem-rate-control-escalation')!
+        const option = dp.options.find((o) => o.id === 'check-ekg')!
+        expect(option.effect.kind).toBe('none')
+        expect(option.manualTone).toBe('caution')
+
+        useSimStore.getState().chooseDecisionOption('check-ekg')
+        const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'check-ekg')!
+        expect(marker.decisionTone).toBe('caution')
+      })
+
+      it('"discontinue diltiazem" is manualTone critical, infusion untouched', () => {
+        const infusionsBefore = useSimStore.getState().infusions
+        useSimStore.getState().chooseDecisionOption('discontinue-diltiazem')
+        const state = useSimStore.getState()
+        const marker = state.log.find((e) => e.decisionOptionId === 'discontinue-diltiazem')!
+        expect(marker.decisionTone).toBe('critical')
+        expect(state.infusions).toEqual(infusionsBefore)
+      })
+    })
+  })
+
+  describe('every new decision point does not refire once shown', () => {
+    it('the analgosedation weaning point stays marked shown after being dismissed', () => {
+      useSimStore.getState().startScenario(ANALGOSEDATION, 'training')
+      useSimStore.setState({ phase: 'sim' })
+      const fentanylInfusion = useSimStore.getState().infusions.find((i) => i.drugId === 'fentanyl')!
+      useSimStore.getState().completeBeginBag(fentanylInfusion.id)
+      useSimStore.getState().submitDose('order-fentanyl-as', 25, { independentCheck: { secondCheckName: 'Test Nurse', secondCheckRole: 'RN' } })
+      useSimStore.setState((s) => ({
+        infusions: [
+          ...s.infusions.map((i) => (i.drugId === 'fentanyl' ? { ...i, rate: 100 } : i)),
+          {
+            id: 'test-infusion-dex-as-3',
+            orderId: 'order-dexmedetomidine-as',
+            drugId: 'dexmedetomidine',
+            status: 'infusing',
+            rate: 0.5,
+            initialRate: 0.2,
+            channel: 'B',
+            beginBagCompleted: true,
+            lastActionMinute: 0,
+            stoppedAtMinute: null,
+            rateBeforePause: null,
+          },
+        ],
+      }))
+      useSimStore.getState().advanceClock(5)
+      expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'analgosedation-weaning' })
+      useSimStore.getState().dismissDecisionPoint()
+      expect(useSimStore.getState().decisionPointsShown['analgosedation-weaning']).toBe(true)
+      useSimStore.getState().advanceClock(1) // still eligible — must not refire
+      expect(useSimStore.getState().pendingDecisionPoint).toBeNull()
     })
   })
 })

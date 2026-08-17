@@ -5,6 +5,8 @@ import {
   SINGLE_AGENT_EARLY_NOTIFICATION,
   SEQUENTIAL_PRESSOR_ESCALATION,
   WEANING_SUPPORT,
+  ANALGOSEDATION,
+  DILTIAZEM_RATE_CONTROL,
 } from '../data/scenarios'
 import { FORMULARY, getDrug } from '../data/formulary'
 import { deriveActivationText } from '../engine/activation'
@@ -71,11 +73,11 @@ function fullContribution(scenario: ScenarioConfig, drugId: DrugId): number {
   return projectDoseResponse(order.maxDose, drug.maxDose, model.maxMapContribution)
 }
 
-describe('all four scenarios — structural sanity', () => {
+describe('all six scenarios — structural sanity', () => {
   const scenarios = Object.values(SCENARIOS)
 
   it('are all registered exactly once, keyed by their own id', () => {
-    expect(scenarios).toHaveLength(4)
+    expect(scenarios).toHaveLength(6)
     for (const s of scenarios) {
       expect(SCENARIOS[s.id]).toBe(s)
     }
@@ -109,6 +111,8 @@ describe('all four scenarios — structural sanity', () => {
     expect(SINGLE_AGENT_EARLY_NOTIFICATION.enableBlockOfCharting).toBe(false)
     expect(SEQUENTIAL_PRESSOR_ESCALATION.enableBlockOfCharting).toBe(false)
     expect(WEANING_SUPPORT.enableBlockOfCharting).toBe(false)
+    expect(ANALGOSEDATION.enableBlockOfCharting).toBe(false)
+    expect(DILTIAZEM_RATE_CONTROL.enableBlockOfCharting).toBe(false)
   })
 })
 
@@ -158,6 +162,16 @@ describe('scenario — sequential pressor escalation', () => {
     const phenylephrine = SEQUENTIAL_PRESSOR_ESCALATION.orders.find((o) => o.drugId === 'phenylephrine')!
     expect(phenylephrine.activationThreshold).toBeCloseTo(0.4)
   })
+
+  it('Phase 19g: phenylephrine gains an earlyNotificationThreshold, and both orders gain weanOrder (additive scenario-data change)', () => {
+    const norepi = SEQUENTIAL_PRESSOR_ESCALATION.orders.find((o) => o.drugId === 'norepinephrine')!
+    const phenylephrine = SEQUENTIAL_PRESSOR_ESCALATION.orders.find((o) => o.drugId === 'phenylephrine')!
+    expect(phenylephrine.earlyNotificationThreshold).toBeCloseTo(0.3)
+    // Most-recently-added agent (phenylephrine) weans first; the mainstay (norepinephrine)
+    // weans last — same inverse-of-sequence convention as the flagship.
+    expect(phenylephrine.weanOrder).toBe(1)
+    expect(norepi.weanOrder).toBe(2)
+  })
 })
 
 describe('scenario — weaning support', () => {
@@ -183,5 +197,230 @@ describe('scenario — weaning support', () => {
     const norepinephrine = WEANING_SUPPORT.orders.find((o) => o.drugId === 'norepinephrine')!
     expect(phenylephrine.weanOrder).toBe(1)
     expect(norepinephrine.weanOrder).toBe(3)
+  })
+})
+
+describe('scenario — analgosedation', () => {
+  it('is registered', () => {
+    expect(SCENARIOS[ANALGOSEDATION.id]).toBe(ANALGOSEDATION)
+  })
+
+  it('has a non-empty learning objective', () => {
+    expect(ANALGOSEDATION.objective.length).toBeGreaterThan(0)
+  })
+
+  it('has Block of Charting disabled', () => {
+    expect(ANALGOSEDATION.enableBlockOfCharting).toBe(false)
+  })
+
+  it('pre-seeds fentanyl (sequence 1) as hanging so the independent double-check gate applies on its first initiate', () => {
+    // submitDose's independent-check hard gate (state/store.ts) is only reachable when
+    // `infusion` is truthy — a sequence-1 agent with no pre-seeded initialInfusions
+    // entry would let the gate be silently skipped on its very first real initiate.
+    expect(ANALGOSEDATION.initialInfusions).toHaveLength(1)
+    const infusion = ANALGOSEDATION.initialInfusions[0]
+    expect(infusion.drugId).toBe('fentanyl')
+    expect(infusion.status).toBe('hanging')
+    expect(infusion.beginBagCompleted).toBe(false)
+  })
+
+  it('dexmedetomidine (sequence 2) has no pre-seeded infusion, matching every other sequence-2 agent in this app', () => {
+    const dexInfusion = ANALGOSEDATION.initialInfusions.find((i) => i.drugId === 'dexmedetomidine')
+    expect(dexInfusion).toBeUndefined()
+  })
+
+  it('fentanyl targets painScore <= 4 and dexmedetomidine targets RASS between -2 and 0', () => {
+    const fentanylOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'fentanyl')!
+    const dexOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'dexmedetomidine')!
+    expect(fentanylOrder.target).toEqual({ metric: 'painScore', comparator: '<=', value: 4, unit: 'score' })
+    expect(dexOrder.target).toEqual({ metric: 'RASS', comparator: 'between', value: -2, valueHigh: 0, unit: 'score' })
+  })
+
+  it('orders match the Attachment B formulary defaults exactly', () => {
+    for (const order of ANALGOSEDATION.orders) {
+      const drug = getDrug(order.drugId)
+      expect(order.startDose).toBe(drug.startDose)
+      expect(order.increment).toBe(drug.titrationIncrement)
+      expect(order.interval).toEqual(drug.titrationInterval)
+      expect(order.maxDose).toBe(drug.maxDose)
+    }
+  })
+
+  it('Phase 19g: dexmedetomidine gains an earlyNotificationThreshold (additive scenario-data change)', () => {
+    const dexOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'dexmedetomidine')!
+    expect(dexOrder.earlyNotificationThreshold).toBeCloseTo(0.5)
+  })
+
+  it("dexmedetomidine's activationThreshold is exactly fentanyl's startDose / maxDose (1/6) — analgesia established, not maxed out", () => {
+    const dexOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'dexmedetomidine')!
+    const fentanylOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'fentanyl')!
+    expect(dexOrder.activationThreshold).toBeCloseTo(1 / 6)
+    expect(dexOrder.activationThreshold).toBeCloseTo(fentanylOrder.startDose / fentanylOrder.maxDose)
+  })
+
+  it('weanOrder: dexmedetomidine weans first (1), fentanyl weans last (2) — spontaneous-awakening-trial practice', () => {
+    const fentanylOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'fentanyl')!
+    const dexOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'dexmedetomidine')!
+    expect(dexOrder.weanOrder).toBe(1)
+    expect(fentanylOrder.weanOrder).toBe(2)
+  })
+
+  it('fentanyl alone, at its ordered maximum, closes the pain-score gap to target', () => {
+    const fentanylOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'fentanyl')!
+    const drug = getDrug('fentanyl')
+    const model = ANALGOSEDATION.responseModel.fentanyl!
+    const contribution = projectDoseResponse(fentanylOrder.maxDose, drug.maxDose, model.maxPainScoreContribution!)
+    const projected = ANALGOSEDATION.startingVitals.painScore + contribution
+    expect(meetsTarget(projected, fentanylOrder.target)).toBe(true)
+  })
+
+  it('dexmedetomidine alone, at its ordered maximum, brings RASS into the light-sedation range', () => {
+    const dexOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'dexmedetomidine')!
+    const drug = getDrug('dexmedetomidine')
+    const model = ANALGOSEDATION.responseModel.dexmedetomidine!
+    const contribution = projectDoseResponse(dexOrder.maxDose, drug.maxDose, model.maxRassContribution!)
+    const projected = ANALGOSEDATION.startingVitals.rass + contribution
+    expect(meetsTarget(projected, dexOrder.target)).toBe(true)
+  })
+
+  it('is not a deterioration vignette', () => {
+    expect(ANALGOSEDATION.deterioration).toEqual({ ratePerMinute: 0, maxDrop: 0 })
+  })
+})
+
+describe('scenario — diltiazem rate control', () => {
+  it('is registered', () => {
+    expect(SCENARIOS[DILTIAZEM_RATE_CONTROL.id]).toBe(DILTIAZEM_RATE_CONTROL)
+  })
+
+  it('has a non-empty learning objective', () => {
+    expect(DILTIAZEM_RATE_CONTROL.objective.length).toBeGreaterThan(0)
+  })
+
+  it('has Block of Charting disabled', () => {
+    expect(DILTIAZEM_RATE_CONTROL.enableBlockOfCharting).toBe(false)
+  })
+
+  it('is a genuinely single-agent scenario', () => {
+    expect(DILTIAZEM_RATE_CONTROL.orders).toHaveLength(1)
+    expect(DILTIAZEM_RATE_CONTROL.orders[0].drugId).toBe('diltiazem')
+  })
+
+  it('order matches the Attachment B formulary defaults exactly', () => {
+    const order = DILTIAZEM_RATE_CONTROL.orders[0]
+    const drug = getDrug('diltiazem')
+    expect(order.startDose).toBe(drug.startDose)
+    expect(order.increment).toBe(drug.titrationIncrement)
+    expect(order.interval).toEqual(drug.titrationInterval)
+    expect(order.maxDose).toBe(drug.maxDose)
+  })
+
+  it("targets a genuine HR range (60-100 bpm) via the 'between' comparator, not a single ceiling", () => {
+    const order = DILTIAZEM_RATE_CONTROL.orders[0]
+    expect(order.target).toEqual({ metric: 'HR', comparator: 'between', value: 60, valueHigh: 100, unit: 'bpm' })
+  })
+
+  it('starts elevated, outside the target range', () => {
+    const order = DILTIAZEM_RATE_CONTROL.orders[0]
+    expect(DILTIAZEM_RATE_CONTROL.startingVitals.hr).toBe(142)
+    expect(meetsTarget(DILTIAZEM_RATE_CONTROL.startingVitals.hr, order.target)).toBe(false)
+  })
+
+  it('diltiazem alone, at its ordered maximum, brings HR into the rate-control range', () => {
+    const order = DILTIAZEM_RATE_CONTROL.orders[0]
+    const drug = getDrug('diltiazem')
+    const model = DILTIAZEM_RATE_CONTROL.responseModel.diltiazem!
+    const contribution = projectDoseResponse(order.maxDose, drug.maxDose, model.maxHrContribution!)
+    const projected = DILTIAZEM_RATE_CONTROL.startingVitals.hr + contribution
+    expect(meetsTarget(projected, order.target)).toBe(true)
+  })
+
+  it('has no activation or weaning requirements (single agent)', () => {
+    expect(DILTIAZEM_RATE_CONTROL.orders[0].activationThreshold).toBeUndefined()
+    expect(DILTIAZEM_RATE_CONTROL.orders[0].weanOrder).toBeUndefined()
+  })
+
+  it('Phase 19g: gains an earlyNotificationThreshold (additive scenario-data change)', () => {
+    expect(DILTIAZEM_RATE_CONTROL.orders[0].earlyNotificationThreshold).toBeCloseTo(0.5)
+  })
+})
+
+describe('Phase 19g — decision-point bank shape sanity, all six scenarios', () => {
+  const scenarios = Object.values(SCENARIOS)
+  const EXPECTED_NEW_COUNT: Record<string, number> = {
+    [DEFAULT_SCENARIO.id]: 1, // +1 on top of the flagship's existing Phase 18 pair
+    [SINGLE_AGENT_EARLY_NOTIFICATION.id]: 3,
+    [SEQUENTIAL_PRESSOR_ESCALATION.id]: 3,
+    [WEANING_SUPPORT.id]: 3,
+    [ANALGOSEDATION.id]: 3,
+    [DILTIAZEM_RATE_CONTROL.id]: 3,
+  }
+
+  it('the flagship has exactly 3 decision points total (2 from Phase 18 + 1 new); every other scenario has exactly 3', () => {
+    expect(DEFAULT_SCENARIO.decisionPoints).toHaveLength(3)
+    for (const s of [SINGLE_AGENT_EARLY_NOTIFICATION, SEQUENTIAL_PRESSOR_ESCALATION, WEANING_SUPPORT, ANALGOSEDATION, DILTIAZEM_RATE_CONTROL]) {
+      expect(s.decisionPoints).toHaveLength(EXPECTED_NEW_COUNT[s.id])
+    }
+  })
+
+  it('every decision point id is unique within its own scenario (cross-scenario collisions are harmless — only one scenario is ever active per session)', () => {
+    for (const s of scenarios) {
+      const ids = (s.decisionPoints ?? []).map((dp) => dp.id)
+      expect(new Set(ids).size).toBe(ids.length)
+    }
+  })
+
+  it('every option id is unique within its own decision point', () => {
+    for (const s of scenarios) {
+      for (const dp of s.decisionPoints ?? []) {
+        const optionIds = dp.options.map((o) => o.id)
+        expect(new Set(optionIds).size).toBe(optionIds.length)
+      }
+    }
+  })
+
+  it('every order-scoped trigger (earlyNotification/postTitrate/escalationAttempt) references a real order in its own scenario', () => {
+    for (const s of scenarios) {
+      const orderIds = new Set(s.orders.map((o) => o.id))
+      for (const dp of s.decisionPoints ?? []) {
+        if (dp.trigger.kind !== 'weanEligible') {
+          expect(orderIds.has(dp.trigger.orderId)).toBe(true)
+        }
+      }
+    }
+  })
+
+  it('every submitDose/submitDoseRelative/multiStepTitration/notifyProvider effect references a real order in its own scenario', () => {
+    for (const s of scenarios) {
+      const orderIds = new Set(s.orders.map((o) => o.id))
+      for (const dp of s.decisionPoints ?? []) {
+        for (const option of dp.options) {
+          if ('orderId' in option.effect) {
+            expect(orderIds.has(option.effect.orderId)).toBe(true)
+          }
+        }
+      }
+    }
+  })
+
+  it("every 'none'/'resumeManual' effect option carries a manualTone; every other kind omits it (never consulted, so authoring one would be misleading)", () => {
+    for (const s of scenarios) {
+      for (const dp of s.decisionPoints ?? []) {
+        for (const option of dp.options) {
+          if (option.effect.kind === 'none' || option.effect.kind === 'resumeManual') {
+            expect(option.manualTone).toBeDefined()
+          } else {
+            expect(option.manualTone).toBeUndefined()
+          }
+        }
+      }
+    }
+  })
+
+  it("the diltiazem escalation ceiling's \"check the EKG first\" option is manualTone caution, not critical (the plan's explicitly-checked counter-example)", () => {
+    const dp = DILTIAZEM_RATE_CONTROL.decisionPoints!.find((d) => d.id === 'diltiazem-rate-control-escalation')!
+    const option = dp.options.find((o) => o.id === 'check-ekg')!
+    expect(option.effect.kind).toBe('none')
+    expect(option.manualTone).toBe('caution')
   })
 })

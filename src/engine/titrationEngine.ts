@@ -11,7 +11,8 @@
  * vice versa — the sim evaluates both (CLINICAL_SPEC.md #6).
  */
 import { isTitrationIntervalSatisfied } from './clock'
-import type { Order, TitrationTarget, TitrationViolations } from '../state/types'
+import { formatTargetClause, formatTargetGapText } from './orderText'
+import type { Order, TitrationTarget, TitrationViolations, VitalSigns } from '../state/types'
 
 export type TitrationAction = 'initiate' | 'titrate'
 export type TitrationStatus = 'ok' | 'off-order' | 'needs-provider'
@@ -25,7 +26,7 @@ export interface TitrationRequest {
   currentMinute: number
   /** Minute of the last dose-changing action for this infusion (initiation counts); null before initiation. */
   lastActionMinute: number | null
-  currentMap: number
+  vitals: VitalSigns
   /**
    * For sequence > 1 orders: whether this agent's activation condition is met (every
    * lower-sequence agent at its own ordered maximum with target still unmet). Ignored
@@ -54,10 +55,28 @@ function nearlyEqual(a: number, b: number): boolean {
   return Math.abs(a - b) < EPSILON
 }
 
+/** Reads whichever vital a target's `metric` actually names, so callers never hardcode `vitals.map`. */
+export function resolveTargetValue(vitals: VitalSigns, metric: TitrationTarget['metric']): number {
+  switch (metric) {
+    case 'MAP':
+      return vitals.map
+    case 'HR':
+      return vitals.hr
+    case 'RASS':
+      return vitals.rass
+    case 'painScore':
+      return vitals.painScore
+  }
+}
+
 export function meetsTarget(currentValue: number, target: TitrationTarget): boolean {
   switch (target.comparator) {
     case '>=':
       return currentValue >= target.value
+    case '<=':
+      return currentValue <= target.value
+    case 'between':
+      return currentValue >= target.value && currentValue <= (target.valueHigh ?? target.value)
   }
 }
 
@@ -78,20 +97,47 @@ export interface MultiStepTitrationPlan {
 
 /**
  * Plans a multi-step titration from `currentDose` toward `requestedTarget`, stepping by
- * `increment` and never exceeding `maxAllowedDose`. Pure — used by
+ * `increment`, bidirectional: `requestedTarget > currentDose` plans UPWARD, clamped to
+ * never exceed `maxAllowedDose`; `requestedTarget < currentDose` plans DOWNWARD (e.g. a
+ * weaning order's down-titration), clamped to never go below `minAllowedDose` (default
+ * 0 — a plain 0 floor for a non-weaning order, since evaluateTitration only forbids
+ * `<= 0`; callers weaning a `weanOrder` order pass its own `startDose` instead, matching
+ * priorAgentsWeaned's own definition of "cleared"). `requestedTarget === currentDose` is
+ * always a no-op empty plan, either direction. The downward branch is an exact mirror of
+ * the upward one — same snapping/rounding/MAX_LEAP_STEPS logic, just stepping by
+ * `-increment` and clamping against a floor instead of a ceiling. Pure — used by
  * runMultiStepTitration (state/store.ts) to both preview and apply the plan, so the
  * preview and what actually gets applied can never drift apart. (Renamed from
  * computeGuidedLeapDoses/GuidedLeapPlan in Phase 18 — "guided"/"leap" language was
  * dropped from learner-facing copy; this rename keeps the codebase's own vocabulary
- * consistent with what's shown on screen.)
+ * consistent with what's shown on screen. Made bidirectional after a user-reported bug:
+ * the mechanic was originally built up-only and silently couldn't help a learner
+ * weaning a pressor down, per the weaningSupport scenario's whole teaching point.)
  */
 export function computeMultiStepDoses(
   currentDose: number,
   increment: number,
   maxAllowedDose: number,
   requestedTarget: number,
+  minAllowedDose: number = 0,
 ): MultiStepTitrationPlan {
-  if (!Number.isFinite(requestedTarget) || requestedTarget <= currentDose || increment <= 0) {
+  if (!Number.isFinite(requestedTarget) || increment <= 0) {
+    return { doses: [], wasSnappedDown: false }
+  }
+
+  if (requestedTarget < currentDose) {
+    const clampedTarget = Math.max(requestedTarget, minAllowedDose)
+    const rawSteps = (currentDose - clampedTarget) / increment
+    const steps = Math.min(Math.floor(rawSteps + EPSILON), MAX_LEAP_STEPS)
+    if (steps <= 0) return { doses: [], wasSnappedDown: false }
+    const decimalPlaces = Math.max(decimalPlacesOf(currentDose), decimalPlacesOf(increment))
+    const doses = Array.from({ length: steps }, (_, i) => Number((currentDose - increment * (i + 1)).toFixed(decimalPlaces)))
+    const finalDose = doses[doses.length - 1]
+    const wasSnappedDown = finalDose - clampedTarget > EPSILON || clampedTarget > requestedTarget
+    return { doses, wasSnappedDown }
+  }
+
+  if (requestedTarget <= currentDose) {
     return { doses: [], wasSnappedDown: false }
   }
   const clampedTarget = Math.min(requestedTarget, maxAllowedDose)
@@ -113,10 +159,11 @@ export function evaluateTitration(request: TitrationRequest): TitrationResult {
     proposedDose,
     currentMinute,
     lastActionMinute,
-    currentMap,
+    vitals,
     priorAgentActivationMet,
     priorAgentsWeaned,
   } = request
+  const currentValue = resolveTargetValue(vitals, order.target.metric)
 
   if (proposedDose <= 0) {
     return { status: 'off-order', reasons: ['Dose must be greater than 0.'], violations: { invalidDose: true } }
@@ -149,7 +196,7 @@ export function evaluateTitration(request: TitrationRequest): TitrationResult {
   }
 
   // action === 'titrate'
-  const targetMet = meetsTarget(currentMap, order.target)
+  const targetMet = meetsTarget(currentValue, order.target)
 
   if (proposedDose < currentDose && order.weanOrder != null && order.weanOrder > 1 && !priorAgentsWeaned) {
     return {
@@ -164,7 +211,7 @@ export function evaluateTitration(request: TitrationRequest): TitrationResult {
       ? {
           status: 'needs-provider',
           reasons: [
-            `Requested dose exceeds the ordered maximum (${order.maxDose}) with ${order.target.metric} still below target — notify the provider before proceeding.`,
+            `Requested dose exceeds the ordered maximum (${order.maxDose}) with ${formatTargetGapText(order.target)} — notify the provider before proceeding.`,
           ],
           violations: { exceedsOrderMax: true },
         }
@@ -179,9 +226,7 @@ export function evaluateTitration(request: TitrationRequest): TitrationResult {
   const violations: TitrationViolations = {}
 
   if (targetMet && proposedDose > currentDose) {
-    reasons.push(
-      `Target already met (${order.target.metric} ${order.target.comparator} ${order.target.value} ${order.target.unit}) — further up-titration is not indicated.`,
-    )
+    reasons.push(`Target already met (${formatTargetClause(order.target)}) — further up-titration is not indicated.`)
     violations.targetAlreadyMet = true
   }
 

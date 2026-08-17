@@ -35,10 +35,11 @@ export function Debrief() {
   const infusions = useSimStore((s) => s.infusions)
   const log = useSimStore((s) => s.log)
   const verificationFlags = useSimStore((s) => s.verificationFlags)
+  const independentCheckFlags = useSimStore((s) => s.independentCheckFlags)
   const adherenceFlags = useSimStore((s) => s.adherenceFlags)
   const blockOfChartingHistory = useSimStore((s) => s.blockOfChartingHistory)
 
-  const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory })
+  const card = scoreSession({ orders, infusions, log, verificationFlags, independentCheckFlags, adherenceFlags, blockOfChartingHistory })
   const decisionEntries = log.filter((e) => e.decisionPointId != null)
 
   const skillAttempts = useSkillTrackingStore((s) => s.skillAttempts)

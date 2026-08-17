@@ -18,10 +18,12 @@ import {
   computeMultiStepDoses,
   evaluateTitration,
   meetsTarget,
+  resolveTargetValue,
   type TitrationAction,
   type TitrationResult,
 } from '../engine/titrationEngine'
 import { getDrug } from '../data/formulary'
+import { MEDICATION_VERIFICATION } from '../data/policy'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
 import type {
   BlockOfChartingRecord,
@@ -92,6 +94,22 @@ function spo2ContributionFor(infusion: Infusion, scenario: ScenarioConfig): numb
   return projectDoseResponse(infusion.rate, drug.maxDose, maxSpo2Contribution)
 }
 
+/** RASS sibling of hrContributionFor — same sqrt-response shape, no facilitator override (Phase 10's `vitalOverrides` stays HR/SBP/DBP/SpO2-only; RASS is out of that phase's scope). */
+function rassContributionFor(infusion: Infusion, scenario: ScenarioConfig): number {
+  const maxRassContribution = scenario.responseModel[infusion.drugId]?.maxRassContribution
+  if (maxRassContribution == null) return 0
+  const drug = getDrug(infusion.drugId)
+  return projectDoseResponse(infusion.rate, drug.maxDose, maxRassContribution)
+}
+
+/** Pain-score sibling of hrContributionFor — same sqrt-response shape, no facilitator override. */
+function painScoreContributionFor(infusion: Infusion, scenario: ScenarioConfig): number {
+  const maxPainScoreContribution = scenario.responseModel[infusion.drugId]?.maxPainScoreContribution
+  if (maxPainScoreContribution == null) return 0
+  const drug = getDrug(infusion.drugId)
+  return projectDoseResponse(infusion.rate, drug.maxDose, maxPainScoreContribution)
+}
+
 /**
  * Sequence > 1 orders activate once every lower-sequence order's infusion is at (or
  * past) `order.activationThreshold` of its own max — defaults to 1 ("at its own max")
@@ -100,7 +118,7 @@ function spo2ContributionFor(infusion: Infusion, scenario: ScenarioConfig): numb
 export function priorAgentsActivationMet(
   infusions: Infusion[],
   orders: Order[],
-  currentMap: number,
+  vitals: VitalSigns,
   order: Order,
 ): boolean {
   const priorOrders = orders.filter((o) => o.sequence < order.sequence)
@@ -111,7 +129,12 @@ export function priorAgentsActivationMet(
     if (!infusion) return false
     const thresholdDose = priorOrder.maxDose * fraction
     const atThreshold = infusion.rate >= thresholdDose - 1e-9
-    const targetUnmet = currentMap < priorOrder.target.value
+    // Routed through the shared meetsTarget/resolveTargetValue helper instead of the
+    // old ad hoc `currentMap < priorOrder.target.value` — that hardcoded a '>=' MAP
+    // comparator regardless of the prior order's actual target, a latent bug that never
+    // surfaced because every prior-sequence order to date targets MAP with '>=', where
+    // "target unmet" (`!meetsTarget`) and "current < value" are exactly equivalent.
+    const targetUnmet = !meetsTarget(resolveTargetValue(vitals, priorOrder.target.metric), priorOrder.target)
     return atThreshold && targetUnmet
   })
 }
@@ -141,10 +164,14 @@ export function priorAgentsWeaned(infusions: Infusion[], orders: Order[], order:
  * (`priorDose` below, `proposedDose` at/above), so it doesn't refire on every
  * subsequent titration past the threshold.
  */
-function crossedEarlyNotificationThreshold(order: Order, priorDose: number, proposedDose: number, currentMap: number): boolean {
+function crossedEarlyNotificationThreshold(order: Order, priorDose: number, proposedDose: number, vitals: VitalSigns): boolean {
   if (order.earlyNotificationThreshold == null) return false
   const thresholdDose = order.maxDose * order.earlyNotificationThreshold
-  return priorDose < thresholdDose && proposedDose >= thresholdDose && !meetsTarget(currentMap, order.target)
+  return (
+    priorDose < thresholdDose &&
+    proposedDose >= thresholdDose &&
+    !meetsTarget(resolveTargetValue(vitals, order.target.metric), order.target)
+  )
 }
 
 /**
@@ -167,6 +194,23 @@ function isWeanEligible(orders: Order[], infusions: Infusion[]): boolean {
 }
 
 /**
+ * True once every DISTINCT metric targeted across `orders` is independently met —
+ * replaces the old `orders[0]`-as-shared-reference hack, which assumed every order in
+ * the scenario shares one physiologic target (true for every scenario through Phase
+ * 18, but breaks for the analgosedation scenario's two simultaneous targets, painScore
+ * and RASS). Groups by metric rather than checking every order individually since
+ * multiple orders can share one metric (e.g. two MAP-targeted pressors) and only need
+ * to be checked once each.
+ */
+function allTargetsMet(orders: Order[], vitals: VitalSigns): boolean {
+  const metrics = new Set(orders.map((o) => o.target.metric))
+  return Array.from(metrics).every((metric) => {
+    const representative = orders.find((o) => o.target.metric === metric)!
+    return meetsTarget(resolveTargetValue(vitals, metric), representative.target)
+  })
+}
+
+/**
  * The clock-driven half of the 'weanEligible' trigger — in real play, MAP reaching
  * target is fundamentally a clock event (physiology interpolating toward its projected
  * value across advanceClock ticks), not necessarily a dose-entry event, and once
@@ -185,8 +229,7 @@ function deriveWeanEligibleDecisionPointId(
   vitals: VitalSigns,
   decisionPointsShown: Record<string, boolean>,
 ): string | null {
-  const referenceOrder = orders[0]
-  if (!referenceOrder || !meetsTarget(vitals.map, referenceOrder.target) || !isWeanEligible(orders, infusions)) return null
+  if (!allTargetsMet(orders, vitals) || !isWeanEligible(orders, infusions)) return null
   const dp = (scenario.decisionPoints ?? []).find((d) => d.trigger.kind === 'weanEligible' && !decisionPointsShown[d.id])
   return dp?.id ?? null
 }
@@ -208,9 +251,13 @@ function deriveTriggeredDecisionPointId(
   for (const dp of scenario.decisionPoints ?? []) {
     if (decisionPointsShown[dp.id]) continue
     if (dp.trigger.kind === 'earlyNotification' && dp.trigger.orderId === orderId) {
-      if (crossedEarlyNotificationThreshold(order, priorDose, proposedDose, vitals.map)) return dp.id
+      if (crossedEarlyNotificationThreshold(order, priorDose, proposedDose, vitals)) return dp.id
     }
-    if (dp.trigger.kind === 'weanEligible' && meetsTarget(vitals.map, order.target) && isWeanEligible(orders, infusions)) {
+    if (
+      dp.trigger.kind === 'weanEligible' &&
+      meetsTarget(resolveTargetValue(vitals, order.target.metric), order.target) &&
+      isWeanEligible(orders, infusions)
+    ) {
       return dp.id
     }
     // Scoped to THIS order and to a real titrate (never an initiate — an initiate is
@@ -219,11 +266,32 @@ function deriveTriggeredDecisionPointId(
   }
 
   const autoId = autoEarlyNotificationDecisionPointId(orderId)
-  if (!decisionPointsShown[autoId] && crossedEarlyNotificationThreshold(order, priorDose, proposedDose, vitals.map)) {
+  if (!decisionPointsShown[autoId] && crossedEarlyNotificationThreshold(order, priorDose, proposedDose, vitals)) {
     return autoId
   }
 
   return null
+}
+
+/**
+ * Phase 19c: resolves a matching, not-yet-shown 'escalationAttempt' decision point for
+ * this order. Deliberately a small standalone resolver beside deriveTriggeredDecisionPointId
+ * rather than a case folded into that function's own loop — deriveTriggeredDecisionPointId
+ * only ever runs AFTER a dose has successfully applied (its callers are all post-apply),
+ * but 'escalationAttempt' fires on a BLOCKED attempt (hardLimitBlocked/needs-provider),
+ * checked directly at submitDose's two hard-stop early-return branches, which return
+ * before a dose ever applies. Same once-per-session decisionPointsShown guard as every
+ * other trigger.
+ */
+function findEscalationAttemptDecisionPointId(
+  scenario: ScenarioConfig,
+  decisionPointsShown: Record<string, boolean>,
+  orderId: string,
+): string | null {
+  const dp = (scenario.decisionPoints ?? []).find(
+    (d) => d.trigger.kind === 'escalationAttempt' && d.trigger.orderId === orderId && !decisionPointsShown[d.id],
+  )
+  return dp?.id ?? null
 }
 
 /** Non-punitive tone derived from a real dose outcome — never authored (see DecisionTone's doc). */
@@ -238,12 +306,19 @@ function toneFromDoseOutcome(outcome: LogEntry['outcome'], overridden: boolean |
  * entirely the tick a clinical checkpoint fires (crossedEarlyThreshold) — the real
  * decision takes precedence over a workflow-pacing nudge, and resolves the same
  * "climbing for a while" pressure the pacing offer exists to address.
+ *
+ * `wasDecrease` — whether the manual titrate that just triggered this call lowered the
+ * dose — is threaded straight into deriveNextDecisionPoint's `direction`, so a learner
+ * weaning DOWN gets offered a downward milestone (this order's own startDose) instead of
+ * an upward one. Computed by each call site (submitDose, confirmDoseOverride), which
+ * both have the prior and just-applied dose in scope already.
  */
 function applyPacingTrigger(
   get: () => Pick<SimStore, 'orders' | 'infusions' | 'pacingTitrationsSinceOffer' | 'pendingDecisionPoint' | 'pendingPacingOffer'>,
   set: (partial: Partial<SimStore>) => void,
   orderId: string,
   crossedEarlyThreshold: boolean,
+  wasDecrease: boolean,
 ) {
   const s = get()
   if (crossedEarlyThreshold) {
@@ -257,7 +332,7 @@ function applyPacingTrigger(
   }
   const order = s.orders.find((o) => o.id === orderId)
   const infusion = s.infusions.find((i) => i.orderId === orderId)
-  const nextPoint = order && infusion ? deriveNextDecisionPoint(order, s.orders, infusion.rate) : null
+  const nextPoint = order && infusion ? deriveNextDecisionPoint(order, s.orders, infusion.rate, wasDecrease ? 'down' : 'up') : null
   set({
     pacingTitrationsSinceOffer: { ...s.pacingTitrationsSinceOffer, [orderId]: 0 },
     pendingPacingOffer:
@@ -338,7 +413,7 @@ function computeApplyUpdate(
   action: TitrationAction,
   dose: number,
 ): Pick<ApplyStateSlice, 'infusions' | 'log'> & {
-  lastPhysiologyUpdate: { minute: number; map: number; hr: number; spo2: number }
+  lastPhysiologyUpdate: { minute: number; map: number; hr: number; spo2: number; rass: number; painScore: number }
 } {
   const nextInfusion: Infusion = infusion
     ? {
@@ -384,7 +459,14 @@ function computeApplyUpdate(
   return {
     infusions,
     log: [...s.log, ...marEntry],
-    lastPhysiologyUpdate: { minute: s.clockMinutes, map: s.vitals.map, hr: s.vitals.hr, spo2: s.vitals.spo2 },
+    lastPhysiologyUpdate: {
+      minute: s.clockMinutes,
+      map: s.vitals.map,
+      hr: s.vitals.hr,
+      spo2: s.vitals.spo2,
+      rass: s.vitals.rass,
+      painScore: s.vitals.painScore,
+    },
   }
 }
 
@@ -420,8 +502,10 @@ interface SimStore {
   orders: Order[]
   log: LogEntry[]
   verificationFlags: Record<string, boolean>
+  /** Phase 19d: independent (two-nurse) double-check completion for high-alert drugs, keyed by the action's LogEntry id — mirrors verificationFlags exactly. */
+  independentCheckFlags: Record<string, boolean>
   adherenceFlags: Record<string, boolean>
-  lastPhysiologyUpdate: { minute: number; map: number; hr: number; spo2: number } | null
+  lastPhysiologyUpdate: { minute: number; map: number; hr: number; spo2: number; rass: number; painScore: number } | null
   /** Cumulative mmHg MAP has dropped below baseline from untreated time — see ScenarioConfig.deterioration. */
   deteriorationOffset: number
   activeBlockOfCharting: BlockOfChartingRecord | null
@@ -487,9 +571,15 @@ interface SimStore {
    * chooseDecisionOption) skips the training-mode pendingOverride detour for an
    * off-order pick — the decision option's own authored feedback already carries the
    * coaching role that detour exists for; a normal, non-decision-panel manual titration
-   * is completely unaffected.
+   * is completely unaffected. `opts.independentCheck` (Phase 19d) carries the second
+   * nurse's identity for a drug requiring an independent double-check at initiation —
+   * see MEDICATION_VERIFICATION and the hard gate inside this action.
    */
-  submitDose: (orderId: string, dose: number, opts?: { fromDecisionPanel?: boolean }) => LogEntry | null
+  submitDose: (
+    orderId: string,
+    dose: number,
+    opts?: { fromDecisionPanel?: boolean; independentCheck?: { secondCheckName: string; secondCheckRole: string } },
+  ) => LogEntry | null
   /** Applies a pending training-mode override: logs it as 'applied'/overridden and mutates the infusion. */
   confirmDoseOverride: () => void
   /** Rejects a pending training-mode override: logs it as 'off-order', infusion untouched. */
@@ -537,8 +627,11 @@ function initialSimFields(
     orders: scenario.orders.map((o) => ({ ...o, activatesWhen: deriveActivationText(o, scenario.orders) })),
     log: [] as LogEntry[],
     verificationFlags: {} as Record<string, boolean>,
+    independentCheckFlags: {} as Record<string, boolean>,
     adherenceFlags: {} as Record<string, boolean>,
-    lastPhysiologyUpdate: null as { minute: number; map: number; hr: number; spo2: number } | null,
+    lastPhysiologyUpdate: null as
+      | { minute: number; map: number; hr: number; spo2: number; rass: number; painScore: number }
+      | null,
     deteriorationOffset: 0,
     activeBlockOfCharting: null as BlockOfChartingRecord | null,
     blockOfChartingHistory: [] as BlockOfChartingRecord[],
@@ -715,6 +808,28 @@ export const useSimStore = create<SimStore>((set, get) => ({
       return null
     }
 
+    // Phase 19d: an ADDITIONAL independent (two-nurse) double-check gate, on top of the
+    // BCMA/I-TRACE check every drug gets, for genuinely high-alert drugs only (fentanyl,
+    // per data/policy.ts's per-DrugId MEDICATION_VERIFICATION) — mirrors the
+    // beginBagCompleted gate immediately above in placement/shape. Initiation only,
+    // matching every other verification precedent in this sim (titration of an
+    // already-verified infusion is never re-gated).
+    if (
+      infusion &&
+      action === 'initiate' &&
+      MEDICATION_VERIFICATION[order.drugId].independentDoubleCheckRequired &&
+      !opts?.independentCheck
+    ) {
+      set({
+        feedback: {
+          tone: 'danger',
+          title: 'Independent double-check required',
+          message: `${drug.name} is high-alert — complete an independent (two-nurse) double-check before programming.`,
+        },
+      })
+      return null
+    }
+
     if (infusion && infusion.status === 'stopped') {
       set({
         feedback: {
@@ -744,9 +859,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
           proposedDose: dose,
           currentMinute: state.clockMinutes,
           lastActionMinute: infusion?.lastActionMinute ?? null,
-          currentMap: state.vitals.map,
+          vitals: state.vitals,
           priorAgentActivationMet:
-            order.sequence === 1 || priorAgentsActivationMet(state.infusions, state.orders, state.vitals.map, order),
+            order.sequence === 1 || priorAgentsActivationMet(state.infusions, state.orders, state.vitals, order),
           priorAgentsWeaned: priorAgentsWeaned(state.infusions, state.orders, order),
         })
 
@@ -793,7 +908,12 @@ export const useSimStore = create<SimStore>((set, get) => ({
       finalOutcome === 'applied' &&
       action === 'titrate' &&
       !blockActive &&
-      crossedEarlyNotificationThreshold(order, infusion?.rate ?? 0, dose, state.vitals.map)
+      crossedEarlyNotificationThreshold(order, infusion?.rate ?? 0, dose, state.vitals)
+
+    // Phase 19d: by the time we reach here, the hard gate above has already guaranteed
+    // opts.independentCheck is present for any initiate on a drug requiring it — so this
+    // is really "was the check required (and therefore performed)," not a live condition.
+    const requiresIndependentCheck = action === 'initiate' && MEDICATION_VERIFICATION[order.drugId].independentDoubleCheckRequired
 
     const entry: LogEntry = {
       id: nextId('log'),
@@ -810,18 +930,35 @@ export const useSimStore = create<SimStore>((set, get) => ({
       underBlockOfCharting: blockActive || undefined,
       overridden,
       earlyNotificationDue: crossedEarlyThreshold || undefined,
+      secondCheckName: requiresIndependentCheck ? opts?.independentCheck?.secondCheckName : undefined,
+      secondCheckRole: requiresIndependentCheck ? opts?.independentCheck?.secondCheckRole : undefined,
     }
 
     // BCMA/I-TRACE verification only runs at Begin Bag / initiation (see Simulation.tsx's
     // narrowed PendingAction) — titrations are ungated, so only initiate entries are
     // "verifiable" at all (scoring.ts category 4 keys off key presence, not just value).
+    // independentCheckFlags mirrors verificationFlags exactly, but only for drugs whose
+    // MEDICATION_VERIFICATION requires the independent double-check (see the hard gate
+    // above, which is what actually guarantees this is true whenever it's required).
     set((s) => ({
       log: [...s.log, entry],
       verificationFlags: action === 'initiate' ? { ...s.verificationFlags, [entry.id]: true } : s.verificationFlags,
+      independentCheckFlags: requiresIndependentCheck
+        ? { ...s.independentCheckFlags, [entry.id]: true }
+        : s.independentCheckFlags,
       adherenceFlags: { ...s.adherenceFlags, [entry.id]: result.status === 'ok' },
     }))
 
     if (finalOutcome === 'hardLimitBlocked') {
+      // Phase 19c: a matching, not-yet-shown 'escalationAttempt' decision point (if any)
+      // wins over the routine "Blocked by Guardrails" toast — presenting the real "what's
+      // your next move" choice instead. No scenario authors this trigger yet (19g's job),
+      // so this is a no-op for every scenario today — today's toast fires unchanged.
+      const escalationId = findEscalationAttemptDecisionPointId(state.scenario, state.decisionPointsShown, orderId)
+      if (escalationId) {
+        get().presentDecisionPoint(escalationId)
+        return entry
+      }
       set({
         feedback: {
           tone: 'danger',
@@ -833,6 +970,12 @@ export const useSimStore = create<SimStore>((set, get) => ({
     }
 
     if (finalOutcome === 'needs-provider') {
+      // Same precedence as the hardLimitBlocked branch above.
+      const escalationId = findEscalationAttemptDecisionPointId(state.scenario, state.decisionPointsShown, orderId)
+      if (escalationId) {
+        get().presentDecisionPoint(escalationId)
+        return entry
+      }
       set({
         feedback:
           state.mode === 'training'
@@ -890,7 +1033,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
     // the pacing offer — skipped under Block of Charting, where free titration is already
     // sanctioned and a pacing nudge would just be noise. A one-time starting dose isn't
     // part of the "repeated manual titrations" pattern the pacing offer tracks.
-    if (action === 'titrate' && !blockActive) applyPacingTrigger(get, set, order.id, crossedEarlyThreshold)
+    if (action === 'titrate' && !blockActive) applyPacingTrigger(get, set, order.id, crossedEarlyThreshold, dose < (infusion?.rate ?? 0))
 
     // Both initiating and titrating advance the clock by the order's own interval — the
     // pump doesn't know or care which kind of dose-change just happened. A facilitator-
@@ -915,7 +1058,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
     const crossedEarlyThreshold =
       pending.action === 'titrate' &&
-      crossedEarlyNotificationThreshold(order, infusion?.rate ?? 0, pending.dose, state.vitals.map)
+      crossedEarlyNotificationThreshold(order, infusion?.rate ?? 0, pending.dose, state.vitals)
 
     const entry: LogEntry = {
       id: nextId('log'),
@@ -968,7 +1111,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
       })
     }
 
-    if (pending.action === 'titrate') applyPacingTrigger(get, set, order.id, crossedEarlyThreshold)
+    if (pending.action === 'titrate')
+      applyPacingTrigger(get, set, order.id, crossedEarlyThreshold, pending.dose < (infusion?.rate ?? 0))
 
     get().advanceClock(order.interval.minMinutes)
   },
@@ -1112,13 +1256,41 @@ export const useSimStore = create<SimStore>((set, get) => ({
     set({ pendingPacingOffer: null, pendingDecisionPoint: null })
     if (!order || !infusion || infusion.status !== 'infusing') return
     const drug = getDrug(order.drugId)
-    const plan = computeMultiStepDoses(infusion.rate, order.increment, order.maxDose, targetDose)
+    const isDownward = targetDose < infusion.rate
+
+    // Safety gate: mirrors evaluateTitration's own wrongWeanOrder check exactly (reusing
+    // the same exported priorAgentsWeaned, not reimplementing it) — a down-titration
+    // plan through this convenience mechanic must be refused under the exact same
+    // condition a manual down-titrate would be, so the auto-titrate shortcut can never
+    // become a silent way around the weaning safety net.
+    if (isDownward && order.weanOrder != null && !priorAgentsWeaned(get().infusions, get().orders, order)) {
+      set({
+        feedback: {
+          tone: 'danger',
+          title: 'Lower-weanOrder agent not yet cleared',
+          message: `A lower-weanOrder agent must be weaned to at or below its own starting dose before ${drug.name} can be titrated down — no steps were applied.`,
+        },
+      })
+      return
+    }
+
+    // A weaning order's auto-down-titration floors at its own ordered starting dose
+    // (matching priorAgentsWeaned's own definition of "cleared"), not all the way to 0 —
+    // an order with no weanOrder floors at plain 0 (evaluateTitration only forbids <= 0).
+    // Upward plans are unaffected — no floor argument applies to a climb.
+    const plan = isDownward
+      ? computeMultiStepDoses(infusion.rate, order.increment, order.maxDose, targetDose, order.weanOrder != null ? order.startDose : 0)
+      : computeMultiStepDoses(infusion.rate, order.increment, order.maxDose, targetDose)
 
     let appliedCount = 0
     let interruptedByDecisionPoint = false
     for (const dose of plan.doses) {
       const s = get()
-      if (meetsTarget(s.vitals.map, order.target)) break
+      // Only the upward case should stop the instant target is met — a downward/weaning
+      // plan's whole premise is that target is ALREADY met throughout (that's why weaning
+      // is safe to do), so this same check would wrongly break before applying even one
+      // step of a legitimate down-titration.
+      if (!isDownward && meetsTarget(resolveTargetValue(s.vitals, order.target.metric), order.target)) break
       const currentInfusion = s.infusions.find((i) => i.orderId === orderId) ?? null
       const actionEntry: LogEntry = {
         id: nextId('log'),
@@ -1255,19 +1427,33 @@ export const useSimStore = create<SimStore>((set, get) => ({
     const projectedHr = projectMap(state.scenario.startingVitals.hr, hrContributions)
     const spo2Contributions = infusingInfusions.map((i) => spo2ContributionFor(i, state.scenario))
     const projectedSpo2 = projectMap(state.scenario.startingVitals.spo2, spo2Contributions)
+    // RASS/painScore siblings of the HR/SpO2 passes above — no scenario targets either
+    // yet (19a is foundation-only; the analgosedation scenario that actually exercises
+    // these arrives in 19f), so these are currently always 0/0 in practice, but wired
+    // through identically for when they do.
+    const rassContributions = infusingInfusions.map((i) => rassContributionFor(i, state.scenario))
+    const projectedRass = projectMap(state.scenario.startingVitals.rass, rassContributions)
+    const painScoreContributions = infusingInfusions.map((i) => painScoreContributionFor(i, state.scenario))
+    const projectedPainScore = projectMap(state.scenario.startingVitals.painScore, painScoreContributions)
 
     let map = state.vitals.map
     // "Clean" (pre-jitter) HR/SpO2 baselines — periodicVariability layers on top of
     // these afterward, same as it always has for HR; SpO2 stays jitter-free (Phase 8d
-    // never added SpO2 jitter, and this phase doesn't either).
+    // never added SpO2 jitter, and this phase doesn't either). RASS/painScore are
+    // clinically-decided assessments, not continuously-measured vitals — never jittered,
+    // matching the existing "never jitter a clinically-decided value" rule.
     let hrBase = state.scenario.startingVitals.hr
     let spo2Base = state.scenario.startingVitals.spo2
+    let rassBase = state.scenario.startingVitals.rass
+    let painScoreBase = state.scenario.startingVitals.painScore
     if (state.lastPhysiologyUpdate) {
       const elapsed = minutesElapsed(nextMinute, state.lastPhysiologyUpdate.minute)
       const fraction = responseFraction(elapsed, state.scenario.responseLagMinutes)
       map = stepTowardTarget(state.lastPhysiologyUpdate.map, projectedMap, fraction)
       hrBase = stepTowardTarget(state.lastPhysiologyUpdate.hr, projectedHr, fraction)
       spo2Base = stepTowardTarget(state.lastPhysiologyUpdate.spo2, projectedSpo2, fraction)
+      rassBase = stepTowardTarget(state.lastPhysiologyUpdate.rass, projectedRass, fraction)
+      painScoreBase = stepTowardTarget(state.lastPhysiologyUpdate.painScore, projectedPainScore, fraction)
     }
 
     // Untreated septic shock doesn't hold steady — MAP keeps declining, independent of
@@ -1345,6 +1531,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
       sbp: sbpOverride ?? baseSbp + bpJitter,
       dbp: dbpOverride ?? baseDbp + bpJitter,
       spo2: spo2Override ?? spo2Base,
+      rass: rassBase,
+      painScore: painScoreBase,
     }
     set({
       clockMinutes: nextMinute,
@@ -1427,7 +1615,14 @@ export const useSimStore = create<SimStore>((set, get) => ({
       ),
       log: [...s.log, entry],
       adherenceFlags: { ...s.adherenceFlags, [entry.id]: true },
-      lastPhysiologyUpdate: { minute: s.clockMinutes, map: s.vitals.map, hr: s.vitals.hr, spo2: s.vitals.spo2 },
+      lastPhysiologyUpdate: {
+        minute: s.clockMinutes,
+        map: s.vitals.map,
+        hr: s.vitals.hr,
+        spo2: s.vitals.spo2,
+        rass: s.vitals.rass,
+        painScore: s.vitals.painScore,
+      },
       feedback: {
         tone: 'success',
         title: 'Infusion restarted',

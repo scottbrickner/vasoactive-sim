@@ -98,6 +98,50 @@ const DECISION_POINTS: DecisionPoint[] = [
       },
     ],
   },
+  {
+    id: 'neutropenic-septic-shock-escalation',
+    trapType: 'doseCeiling',
+    // Phase 19c/19g: fires when a titrate attempt on norepinephrine is refused outright
+    // (Guardrails hard limit, since this order's max and the drug's own max are both 30
+    // mcg/min) in place of the routine "Blocked by Guardrails" toast.
+    trigger: { kind: 'escalationAttempt', orderId: 'order-norepinephrine-agent1' },
+    situation: "Norepinephrine is already at its ordered maximum and MAP is still below target. What's your next move?",
+    policyHint:
+      "CP 4-156: once an infusion reaches its ordered maximum with target still unmet, notify the provider — don't push past the order, and don't abandon an agent that's still contributing.",
+    options: [
+      {
+        id: 'notify-provider',
+        label: 'Notify the provider',
+        caption: 'Document the assessment and await further orders.',
+        group: 'covered',
+        effect: { kind: 'notifyProvider', orderId: 'order-norepinephrine-agent1' },
+        feedback: {
+          text: 'Correct — norepinephrine is at its ordered ceiling with MAP still below target, which is exactly when the provider needs to be notified.',
+        },
+      },
+      {
+        id: 'chart-and-reassess',
+        label: 'Chart vitals and reassess',
+        caption: 'Document the current assessment before deciding next steps.',
+        group: 'covered',
+        effect: { kind: 'chartVitals' },
+        feedback: {
+          text: 'Charting the current assessment is reasonable and keeps the record current — pair it with notifying the provider next, since the order is already maxed out.',
+        },
+      },
+      {
+        id: 'discontinue-norepinephrine',
+        label: 'Discontinue norepinephrine',
+        caption: "It's not closing the gap to target on its own — pull the order?",
+        group: 'gap',
+        effect: { kind: 'none' },
+        manualTone: 'critical',
+        feedback: {
+          text: 'Discontinuing your only pressor while hypotensive removes support entirely — the correct move is escalating (notify the provider), not withdrawing the agent that is still helping.',
+        },
+      },
+    ],
+  },
 ]
 
 export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
@@ -115,6 +159,8 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
     map: 57,
     spo2: 96,
     rhythm: 'Sinus tachycardia',
+    rass: 0,
+    painScore: 0,
   },
   initialInfusions: [
     {
@@ -171,15 +217,15 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
   priorVitals: [
     {
       minutesBeforeStart: 180,
-      vitals: { hr: 92, sbp: 108, dbp: 68, map: 81, spo2: 98, rhythm: 'Sinus rhythm' },
+      vitals: { hr: 92, sbp: 108, dbp: 68, map: 81, spo2: 98, rhythm: 'Sinus rhythm', rass: 0, painScore: 0 },
     },
     {
       minutesBeforeStart: 120,
-      vitals: { hr: 104, sbp: 96, dbp: 58, map: 71, spo2: 97, rhythm: 'Sinus tachycardia' },
+      vitals: { hr: 104, sbp: 96, dbp: 58, map: 71, spo2: 97, rhythm: 'Sinus tachycardia', rass: 0, painScore: 0 },
     },
     {
       minutesBeforeStart: 60,
-      vitals: { hr: 112, sbp: 88, dbp: 52, map: 64, spo2: 97, rhythm: 'Sinus tachycardia' },
+      vitals: { hr: 112, sbp: 88, dbp: 52, map: 64, spo2: 97, rhythm: 'Sinus tachycardia', rass: 0, painScore: 0 },
     },
   ],
   // Illustrative response ceilings (not sourced from Attachment B — physiology.ts is
