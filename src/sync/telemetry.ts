@@ -17,6 +17,18 @@
  * each app builds/deploys independently with its own secret, so there's no collision
  * risk in sharing the name. Configured via a local .env before `npm run build`/`deploy`
  * (this repo has no CI workflow, unlike ZOLL's .github/workflows/deploy-pages.yml).
+ *
+ * As of Phase 18, this is the ONLY completion-recording/notification path — the old
+ * manual Teams-folder-save + JSON/CSV download UI (app/SkillAttemptPanel.tsx) was
+ * replaced with a plain "recorded automatically" confirmation, since every attempt
+ * (training and validation alike) already reaches this beacon via
+ * useSkillTrackingStore's recordAttempt. The receiving Power Automate flow is expected
+ * to also email a results summary to the record's `learnerEmail` (when non-empty) —
+ * same shape of "flow does the real work, this client just POSTs the record" split
+ * already established for the ZOLL sim, but that email step itself lives in the
+ * Power Automate flow's own designer, not in this codebase — nothing here can build or
+ * verify it. If `learnerEmail` is empty (identity wasn't captured — optional in
+ * Training mode), the flow has no address to send to; the record still POSTs.
  */
 import type { AttemptRecord } from '../engine/skillAttempt'
 

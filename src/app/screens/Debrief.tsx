@@ -1,17 +1,25 @@
 import { Button, Panel, Toast } from '../../design/primitives'
 import { useSimStore } from '../../state/store'
 import { useSkillTrackingStore } from '../../state/skillTrackingStore'
+import { resolveDecisionPoint } from '../../engine/decisionPoints'
 import { scoreSession, type ScoreStatus } from '../../engine/scoring'
 import type { AttemptRecord } from '../../engine/skillAttempt'
 import { SKILL_SIGNOFF_CRITERIA } from '../../data/policy'
 import { DocumentationReview } from '../../devices'
 import { SkillAttemptPanel } from '../SkillAttemptPanel'
+import type { DecisionTone, LogEntry, Order, ScenarioConfig } from '../../state/types'
 
 const STATUS_STYLE: Record<ScoreStatus, { label: string; className: string }> = {
   met: { label: 'Met', className: 'bg-success/12 text-success' },
   partial: { label: 'Partial', className: 'bg-gold-soft text-cardinal-dark' },
   missed: { label: 'Missed', className: 'bg-danger/12 text-danger' },
   'n/a': { label: 'N/A', className: 'bg-border/60 text-muted' },
+}
+
+const TONE_STYLE: Record<DecisionTone, { label: string; className: string }> = {
+  good: { label: 'Good call', className: 'bg-success/12 text-success' },
+  caution: { label: 'Worth reconsidering', className: 'bg-gold-soft text-cardinal-dark' },
+  critical: { label: 'Outside your orders', className: 'bg-danger/12 text-danger' },
 }
 
 /**
@@ -22,6 +30,7 @@ const STATUS_STYLE: Record<ScoreStatus, { label: string; className: string }> = 
  */
 export function Debrief() {
   const setPhase = useSimStore((s) => s.setPhase)
+  const scenario = useSimStore((s) => s.scenario)
   const orders = useSimStore((s) => s.orders)
   const infusions = useSimStore((s) => s.infusions)
   const log = useSimStore((s) => s.log)
@@ -30,6 +39,7 @@ export function Debrief() {
   const blockOfChartingHistory = useSimStore((s) => s.blockOfChartingHistory)
 
   const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory })
+  const decisionEntries = log.filter((e) => e.decisionPointId != null)
 
   const skillAttempts = useSkillTrackingStore((s) => s.skillAttempts)
   const lastAttempt = skillAttempts[skillAttempts.length - 1] ?? null
@@ -117,6 +127,19 @@ export function Debrief() {
         </div>
       </Panel>
 
+      {decisionEntries.length > 0 && (
+        <Panel
+          title="Decision review"
+          subtitle="Every 'what's your next move' decision this session, reviewed together — validation mode withholds this live, so this may be the first time you're seeing the reasoning."
+        >
+          <ul className="flex flex-col gap-4">
+            {decisionEntries.map((entry) => (
+              <DecisionReviewRow key={entry.id} entry={entry} scenario={scenario} orders={orders} />
+            ))}
+          </ul>
+        </Panel>
+      )}
+
       <DocumentationReview log={log} />
 
       <SkillAttemptPanel record={lastAttempt} />
@@ -159,5 +182,37 @@ function SkillAttemptBanner({ attempt }: { attempt: AttemptRecord }) {
         `${SKILL_SIGNOFF_CRITERIA.minOverallPercent}% with no category scored "missed." Review the ` +
         'opportunities below and try another validation run when ready.'}
     </Toast>
+  )
+}
+
+/**
+ * One resolved "what's your next move" decision, reviewed at debrief (Phase 18) —
+ * re-resolves the DecisionPoint/DecisionOption from the entry's stored ids (via the
+ * same resolveDecisionPoint used live) rather than duplicating their situation/feedback
+ * text onto the LogEntry itself, so this can never drift from what was actually shown.
+ * Falls back to the entry's own summary if the scenario's decision-point data can't be
+ * resolved (e.g. a saved session viewed after scenario data changed).
+ */
+function DecisionReviewRow({ entry, scenario, orders }: { entry: LogEntry; scenario: ScenarioConfig; orders: Order[] }) {
+  const dp = entry.decisionPointId ? resolveDecisionPoint(scenario.decisionPoints ?? [], orders, entry.decisionPointId) : null
+  const option = dp?.options.find((o) => o.id === entry.decisionOptionId)
+  const tone = entry.decisionTone
+  const style = tone ? TONE_STYLE[tone] : null
+
+  return (
+    <li className="flex flex-col gap-1 border-b border-border pb-4 last:border-0 last:pb-0">
+      <div className="flex items-center justify-between gap-4">
+        <span className="text-sm font-semibold text-ink">{dp?.situation ?? entry.summary}</span>
+        {style && (
+          <span className={`rounded-pill px-3 py-0.5 text-sm font-semibold whitespace-nowrap ${style.className}`}>
+            {style.label}
+          </span>
+        )}
+      </div>
+      <p className="text-sm text-ink">
+        Chosen: <span className="font-medium">{option?.label ?? entry.decisionOptionId}</span>
+      </p>
+      {option && <p className="text-sm text-muted">{option.feedback.text}</p>}
+    </li>
   )
 }

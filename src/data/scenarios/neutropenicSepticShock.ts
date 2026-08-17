@@ -6,7 +6,99 @@
  * complete Begin Bag, and start at the ordered rate. Agent 2 (vasopressin) activates once
  * norepinephrine reaches 1/3 of its ordered maximum with MAP still below target.
  */
-import type { ScenarioConfig } from '../../state/types'
+import type { DecisionPoint, ScenarioConfig } from '../../state/types'
+
+/**
+ * Phase 18's authored "what's your next move" decision points for the flagship
+ * scenario — covers all four order-boundary trap types from the validated mockup
+ * (titration-judgment-mockup.html) using only 'postTitrate'/'weanEligible' triggers,
+ * deliberately NOT 'earlyNotification' — that trigger stays reserved for the
+ * synthesized default (engine/decisionPoints.ts's buildAutoEarlyNotificationDecisionPoint),
+ * which several store.test.ts cases exercise directly against this scenario's norepi
+ * order by setting a custom earlyNotificationThreshold at test time; an authored
+ * decision point on that same trigger would silently supersede those tests' fallback
+ * assertions.
+ */
+const DECISION_POINTS: DecisionPoint[] = [
+  {
+    id: 'neutropenic-septic-shock-documentation',
+    trapType: 'documentationPlacement',
+    // Scoped to vasopressin specifically (not norepinephrine — the far more heavily
+    // exercised order in this scenario's unit tests) so this decision point only fires
+    // once a learner has genuinely progressed to titrating the second agent, never
+    // incidentally mid-way through an unrelated norepinephrine-only test sequence.
+    trigger: { kind: 'postTitrate', orderId: 'order-vasopressin-agent2' },
+    situation: "You've just titrated vasopressin for the first time this session. Time to document the assessment that goes with it.",
+    policyHint: 'CP 4-156: Begin Bag + initial rate chart in MAR; every subsequent titration charts in iView, not MAR.',
+    options: [
+      {
+        id: 'chart-iview',
+        label: 'Chart the assessment in iView',
+        caption: 'Titrations and their associated vitals chart in iView, per CP 4-156.',
+        group: 'covered',
+        effect: { kind: 'chartVitals' },
+        feedback: { text: 'Correct placement — titration follow-up documents in iView, not the MAR.' },
+      },
+      {
+        id: 'chart-mar',
+        label: 'Chart the rate change in the MAR',
+        caption: 'The MAR holds Begin Bag and the initial rate only.',
+        group: 'gap',
+        effect: { kind: 'none' },
+        manualTone: 'critical',
+        feedback: {
+          text: 'The MAR only ever holds Begin Bag and the initial rate — a rate change after that belongs in iView, not the MAR.',
+        },
+      },
+      {
+        id: 'fluid-bolus',
+        label: 'Give a 250 mL normal saline bolus',
+        caption: 'No standing order exists for a bolus in this case.',
+        group: 'gap',
+        effect: { kind: 'none' },
+        manualTone: 'critical',
+        feedback: {
+          text: 'There is no standing order for a fluid bolus here — that would need a provider order first, not an independent nursing action.',
+        },
+      },
+    ],
+  },
+  {
+    id: 'neutropenic-septic-shock-weaning',
+    trapType: 'weanSequence',
+    trigger: { kind: 'weanEligible' },
+    situation: 'Both pressors are infusing and MAP is holding at target. What next?',
+    policyHint: 'CP 4-156 wean priority: the most recently added agent weans first — vasopressin before norepinephrine here.',
+    options: [
+      {
+        id: 'wean-vasopressin',
+        label: 'Wean vasopressin one step',
+        caption: 'Vasopressin was added most recently — it weans first.',
+        group: 'covered',
+        effect: { kind: 'submitDoseRelative', orderId: 'order-vasopressin-agent2', deltaSteps: -1 },
+        feedback: { text: 'Correct sequence — the most recently added agent weans first.' },
+      },
+      {
+        id: 'wean-norepinephrine',
+        label: 'Wean norepinephrine one step',
+        caption: 'Norepinephrine was the first agent started.',
+        group: 'gap',
+        effect: { kind: 'submitDoseRelative', orderId: 'order-norepinephrine-agent1', deltaSteps: -1 },
+        feedback: {
+          text: 'Norepinephrine has a lower wean priority than vasopressin — clear vasopressin first before weaning this agent.',
+        },
+      },
+      {
+        id: 'push-norepinephrine',
+        label: 'Increase norepinephrine to 35 mcg/min',
+        caption: "MAP could still trend higher — worth pushing further?",
+        group: 'gap',
+        effect: { kind: 'submitDose', orderId: 'order-norepinephrine-agent1', dose: 35 },
+        feedback: { text: 'That exceeds the ordered maximum of 30 mcg/min — the Guardrails hard limit blocks it outright.' },
+      },
+    ],
+  },
+]
 
 export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
   id: 'neutropenic-septic-shock',
@@ -49,6 +141,10 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
       increment: 0.5,
       interval: { minMinutes: 3, maxMinutes: 5 },
       target: { metric: 'MAP', comparator: '>=', value: 65, unit: 'mmHg' },
+      // Phase 18: the mainstay/first-added agent weans LAST — inverse of the up-titration
+      // `sequence` field above, per CP 4-156's wean-priority rule (see
+      // engine/orderText.ts's deriveWeanPriorityText and this file's DECISION_POINTS).
+      weanOrder: 2,
     },
     {
       id: 'order-vasopressin-agent2',
@@ -65,6 +161,8 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
       // the derived display text this drives, and store.ts's priorAgentsActivationMet
       // for the actual comparison).
       activationThreshold: 1 / 3,
+      // Most-recently-added agent weans FIRST (see norepinephrine's weanOrder above).
+      weanOrder: 1,
     },
   ],
   responseLagMinutes: { minMinutes: 2, maxMinutes: 5 },
@@ -104,4 +202,5 @@ export const NEUTROPENIC_SEPTIC_SHOCK: ScenarioConfig = {
   deterioration: { ratePerMinute: 0.5, maxDrop: 15 },
   objective: 'Titrate norepinephrine as ordered, and sequence in a second pressor once it stops being enough on its own.',
   enableBlockOfCharting: true,
+  decisionPoints: DECISION_POINTS,
 }

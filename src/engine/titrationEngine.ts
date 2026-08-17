@@ -69,25 +69,28 @@ function decimalPlacesOf(value: number): number {
   return dot === -1 ? 0 : str.length - dot - 1
 }
 
-export interface GuidedLeapPlan {
-  /** The sequence of intermediate doses a guided titration leap would apply, in order. */
+export interface MultiStepTitrationPlan {
+  /** The sequence of intermediate doses a multi-step titration plan would apply, in order. */
   doses: number[]
   /** True when `requestedTarget` didn't land on a clean increment step (or exceeded the allowed max) and had to be snapped down to the nearest reachable dose. */
   wasSnappedDown: boolean
 }
 
 /**
- * Plans a guided multi-step titration leap from `currentDose` toward `requestedTarget`,
- * stepping by `increment` and never exceeding `maxAllowedDose`. Pure — used by
- * runGuidedTitrationLeap (state/store.ts) to both preview and apply the leap, so the
- * preview and what actually gets applied can never drift apart.
+ * Plans a multi-step titration from `currentDose` toward `requestedTarget`, stepping by
+ * `increment` and never exceeding `maxAllowedDose`. Pure — used by
+ * runMultiStepTitration (state/store.ts) to both preview and apply the plan, so the
+ * preview and what actually gets applied can never drift apart. (Renamed from
+ * computeGuidedLeapDoses/GuidedLeapPlan in Phase 18 — "guided"/"leap" language was
+ * dropped from learner-facing copy; this rename keeps the codebase's own vocabulary
+ * consistent with what's shown on screen.)
  */
-export function computeGuidedLeapDoses(
+export function computeMultiStepDoses(
   currentDose: number,
   increment: number,
   maxAllowedDose: number,
   requestedTarget: number,
-): GuidedLeapPlan {
+): MultiStepTitrationPlan {
   if (!Number.isFinite(requestedTarget) || requestedTarget <= currentDose || increment <= 0) {
     return { doses: [], wasSnappedDown: false }
   }

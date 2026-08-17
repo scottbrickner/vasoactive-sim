@@ -47,7 +47,7 @@ describe('deriveActivationText', () => {
   })
 })
 
-// runGuidedTitrationLeap's pacing offer (state/store.ts's PendingPacingOffer) uses this to
+// runMultiStepTitration's pacing offer (state/store.ts's PendingPacingOffer) uses this to
 // suggest a sensible fast-forward target — the nearest upcoming milestone, not just "max".
 describe('deriveNextDecisionPoint', () => {
   it('picks the order\'s own early-notification threshold when it is the nearest milestone', () => {

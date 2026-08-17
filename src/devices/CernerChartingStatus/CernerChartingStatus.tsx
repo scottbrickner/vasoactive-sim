@@ -40,7 +40,7 @@ function CadenceBadge({ met, label }: { met: boolean; label: string }) {
  * ending the session (see Simulation.tsx's soft pre-end warning for that).
  *
  * Leads with a compact "X of Y charted" summary and lists ONLY outstanding checkpoints
- * — a long guided-titration run can rack up dozens of checkpoints that are all already
+ * — a long multi-step titration run can rack up dozens of checkpoints that are all already
  * satisfied by dense auto-charting, and a full row-per-checkpoint table buried real gaps
  * in a wall of "Charted" rows (confirmed during a walkthrough: genuinely-due checkpoints
  * near the end of a long run were technically shown but scrolled well out of view).

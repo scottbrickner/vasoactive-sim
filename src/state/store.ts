@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { deriveActivationText, deriveNextDecisionPoint } from '../engine/activation'
 import { advance, minutesElapsed } from '../engine/clock'
+import { autoEarlyNotificationDecisionPointId, resolveDecisionPoint } from '../engine/decisionPoints'
 import { correctLocationFor } from '../engine/documentation'
 import { evaluateDose, limitsFromOrder } from '../engine/guardrails'
 import { isBlockOverMaxDuration, isPastRemovalThreshold } from '../engine/infusionLifecycle'
@@ -14,7 +15,7 @@ import {
   stepTowardTarget,
 } from '../engine/physiology'
 import {
-  computeGuidedLeapDoses,
+  computeMultiStepDoses,
   evaluateTitration,
   meetsTarget,
   type TitrationAction,
@@ -24,6 +25,7 @@ import { getDrug } from '../data/formulary'
 import { DEFAULT_SCENARIO } from '../data/scenarios'
 import type {
   BlockOfChartingRecord,
+  DecisionTone,
   DrugDefinition,
   DrugId,
   GuardrailStatus,
@@ -146,6 +148,90 @@ function crossedEarlyNotificationThreshold(order: Order, priorDose: number, prop
 }
 
 /**
+ * Phase 18: generalizes crossedEarlyNotificationThreshold's single-trigger check into
+ * the full DecisionPoint trigger vocabulary (see state/types.ts's DecisionPointTrigger).
+ * Checked after every dose that actually reaches an infusion (submitDose,
+ * confirmDoseOverride, runMultiStepTitration's per-step loop) — mirrors
+ * applyPacingTrigger's call-site pattern. Returns whichever decision point newly fires
+ * this tick, or null; a decision point already shown this session (decisionPointsShown)
+ * never re-fires. Falls back to the synthesized early-notification default (see
+ * engine/decisionPoints.ts) for any order whose threshold crosses with no
+ * scenario-authored decision point covering it — this is how the retired
+ * TitrationCheckpointPanel's notify-vs-continue mechanic still fires for scenarios that
+ * don't author their own custom decision points.
+ */
+/** True once every order with a `weanOrder` has an actively-infusing infusion — the state-shape half of the 'weanEligible' trigger (the other half, target-met, is checked by each caller against whichever order's target is in scope). */
+function isWeanEligible(orders: Order[], infusions: Infusion[]): boolean {
+  const weanOrders = orders.filter((o) => o.weanOrder != null)
+  return weanOrders.length > 1 && weanOrders.every((o) => infusions.some((i) => i.orderId === o.id && i.status === 'infusing'))
+}
+
+/**
+ * The clock-driven half of the 'weanEligible' trigger — in real play, MAP reaching
+ * target is fundamentally a clock event (physiology interpolating toward its projected
+ * value across advanceClock ticks), not necessarily a dose-entry event, and once
+ * target IS met a further up-titration is itself off-order (evaluateTitration's
+ * targetAlreadyMet check) — so relying only on deriveTriggeredDecisionPointId's
+ * dose-triggered check (which only runs after a dose successfully APPLIES) would miss
+ * the moment entirely for a learner who reaches target purely by waiting. Checked from
+ * advanceClock, using the scenario's first order as the shared target reference (every
+ * order sharing one physiologic target, e.g. one patient's MAP, is this sim's only
+ * modeled case — see ScenarioConfig's doc comment).
+ */
+function deriveWeanEligibleDecisionPointId(
+  scenario: ScenarioConfig,
+  orders: Order[],
+  infusions: Infusion[],
+  vitals: VitalSigns,
+  decisionPointsShown: Record<string, boolean>,
+): string | null {
+  const referenceOrder = orders[0]
+  if (!referenceOrder || !meetsTarget(vitals.map, referenceOrder.target) || !isWeanEligible(orders, infusions)) return null
+  const dp = (scenario.decisionPoints ?? []).find((d) => d.trigger.kind === 'weanEligible' && !decisionPointsShown[d.id])
+  return dp?.id ?? null
+}
+
+function deriveTriggeredDecisionPointId(
+  scenario: ScenarioConfig,
+  orders: Order[],
+  infusions: Infusion[],
+  vitals: VitalSigns,
+  decisionPointsShown: Record<string, boolean>,
+  orderId: string,
+  priorDose: number,
+  proposedDose: number,
+  action: TitrationAction,
+): string | null {
+  const order = orders.find((o) => o.id === orderId)
+  if (!order) return null
+
+  for (const dp of scenario.decisionPoints ?? []) {
+    if (decisionPointsShown[dp.id]) continue
+    if (dp.trigger.kind === 'earlyNotification' && dp.trigger.orderId === orderId) {
+      if (crossedEarlyNotificationThreshold(order, priorDose, proposedDose, vitals.map)) return dp.id
+    }
+    if (dp.trigger.kind === 'weanEligible' && meetsTarget(vitals.map, order.target) && isWeanEligible(orders, infusions)) {
+      return dp.id
+    }
+    // Scoped to THIS order and to a real titrate (never an initiate — an initiate is
+    // always the order's own startDose, not itself "a titration" to react to).
+    if (dp.trigger.kind === 'postTitrate' && dp.trigger.orderId === orderId && action === 'titrate') return dp.id
+  }
+
+  const autoId = autoEarlyNotificationDecisionPointId(orderId)
+  if (!decisionPointsShown[autoId] && crossedEarlyNotificationThreshold(order, priorDose, proposedDose, vitals.map)) {
+    return autoId
+  }
+
+  return null
+}
+
+/** Non-punitive tone derived from a real dose outcome — never authored (see DecisionTone's doc). */
+function toneFromDoseOutcome(outcome: LogEntry['outcome'], overridden: boolean | undefined): DecisionTone {
+  return outcome === 'applied' && !overridden ? 'good' : 'critical'
+}
+
+/**
  * After a manual (non-leap) titrate applies, bumps that order's pacing counter and —
  * once it reaches PACING_OFFER_THRESHOLD — opens a non-clinical pendingPacingOffer
  * pointed at the nearest upcoming milestone (see deriveNextDecisionPoint). Skipped
@@ -154,7 +240,7 @@ function crossedEarlyNotificationThreshold(order: Order, priorDose: number, prop
  * "climbing for a while" pressure the pacing offer exists to address.
  */
 function applyPacingTrigger(
-  get: () => Pick<SimStore, 'orders' | 'infusions' | 'pacingTitrationsSinceOffer' | 'pendingCheckpoint' | 'pendingPacingOffer'>,
+  get: () => Pick<SimStore, 'orders' | 'infusions' | 'pacingTitrationsSinceOffer' | 'pendingDecisionPoint' | 'pendingPacingOffer'>,
   set: (partial: Partial<SimStore>) => void,
   orderId: string,
   crossedEarlyThreshold: boolean,
@@ -165,7 +251,7 @@ function applyPacingTrigger(
     return
   }
   const count = (s.pacingTitrationsSinceOffer[orderId] ?? 0) + 1
-  if (count < PACING_OFFER_THRESHOLD || s.pendingCheckpoint || s.pendingPacingOffer) {
+  if (count < PACING_OFFER_THRESHOLD || s.pendingDecisionPoint || s.pendingPacingOffer) {
     set({ pacingTitrationsSinceOffer: { ...s.pacingTitrationsSinceOffer, [orderId]: count } })
     return
   }
@@ -204,28 +290,27 @@ export interface PendingOverride {
 }
 
 /**
- * An early-notification-threshold crossing (see crossedEarlyNotificationThreshold)
- * awaiting the learner's decision: notify the provider, or keep titrating the same
- * agent — optionally via a guided multi-step leap (see runGuidedTitrationLeap). Not
- * part of SimState — transient UI-adjacent store state, like PendingOverride.
+ * A triggered decision point (see deriveTriggeredDecisionPointId) awaiting the
+ * learner's pick — Phase 18's generalization of the retired PendingCheckpoint/
+ * TitrationCheckpointPanel (notify-vs-continue only) into N authored options. Not part
+ * of SimState — transient UI-adjacent store state, like PendingOverride. Deliberately
+ * just the id, not a snapshot of dose/MAP at trigger time — the decision card renders
+ * its situation prose from LIVE state (see engine/decisionPoints.ts), not a frozen copy.
  */
-export interface PendingCheckpoint {
-  orderId: string
-  doseAtTrigger: number
-  mapAtTrigger: number
-  triggeredAtMinute: number
+export interface PendingDecisionPoint {
+  decisionPointId: string
 }
 
-/** How many manual (non-leap) titrations on the same order trigger a pacing offer. */
+/** How many manual (non-multi-step) titrations on the same order trigger a pacing offer. */
 const PACING_OFFER_THRESHOLD = 3
 
 /**
  * A non-clinical "want to speed through this climb?" offer — distinct from
- * PendingCheckpoint, which is a real clinical decision (notify provider vs. continue) at
- * an exact threshold. This fires periodically (every PACING_OFFER_THRESHOLD manual
- * titrations) purely to cut down on repetitive clicking toward whatever the next
- * decision point actually is (see engine/activation.ts's deriveNextDecisionPoint). Not
- * part of SimState — transient UI-adjacent store state, like PendingOverride.
+ * PendingDecisionPoint, which is a real clinical decision at an authored trigger. This
+ * fires periodically (every PACING_OFFER_THRESHOLD manual titrations) purely to cut
+ * down on repetitive clicking toward whatever the next decision point actually is (see
+ * engine/activation.ts's deriveNextDecisionPoint). Not part of SimState — transient
+ * UI-adjacent store state, like PendingOverride.
  */
 export interface PendingPacingOffer {
   orderId: string
@@ -343,9 +428,11 @@ interface SimStore {
   blockOfChartingHistory: BlockOfChartingRecord[]
   /** A deferred off-order dose attempt awaiting the training-mode learner's decision. */
   pendingOverride: PendingOverride | null
-  /** An early-notification-threshold crossing awaiting the learner's notify-vs-continue decision. */
-  pendingCheckpoint: PendingCheckpoint | null
-  /** Manual (non-leap) titration count since the last pacing offer, keyed by orderId — resets on offer/clinical-checkpoint. */
+  /** A triggered "what's your next move" decision point awaiting the learner's pick (Phase 18). */
+  pendingDecisionPoint: PendingDecisionPoint | null
+  /** Decision points already presented this session, keyed by decisionPointId — a once-per-session gate so a trigger (or its synthesized fallback) never re-fires after being shown. */
+  decisionPointsShown: Record<string, boolean>
+  /** Manual (non-leap) titration count since the last pacing offer, keyed by orderId — resets on offer/a decision point firing. */
   pacingTitrationsSinceOffer: Record<string, number>
   /** A non-clinical "speed through this climb?" offer awaiting the learner's decision. */
   pendingPacingOffer: PendingPacingOffer | null
@@ -392,18 +479,31 @@ interface SimStore {
   ) => void
 
   completeBeginBag: (infusionId: string) => void
-  /** Handles both initiation (no/hanging infusion) and titration (infusing), keyed by order. */
-  submitDose: (orderId: string, dose: number) => void
+  /**
+   * Handles both initiation (no/hanging infusion) and titration (infusing), keyed by
+   * order. Returns the LogEntry it created (null if it bailed early or deferred to
+   * pendingOverride) — chooseDecisionOption uses the return value to derive a real
+   * DecisionTone from the actual outcome. `fromDecisionPanel: true` (set only by
+   * chooseDecisionOption) skips the training-mode pendingOverride detour for an
+   * off-order pick — the decision option's own authored feedback already carries the
+   * coaching role that detour exists for; a normal, non-decision-panel manual titration
+   * is completely unaffected.
+   */
+  submitDose: (orderId: string, dose: number, opts?: { fromDecisionPanel?: boolean }) => LogEntry | null
   /** Applies a pending training-mode override: logs it as 'applied'/overridden and mutates the infusion. */
   confirmDoseOverride: () => void
   /** Rejects a pending training-mode override: logs it as 'off-order', infusion untouched. */
   cancelDoseOverride: () => void
-  /** Declines to act on a pending early-notification checkpoint for now — no LogEntry (nothing happened). */
-  dismissCheckpoint: () => void
+  /** Opens a decision point by id, marking it shown for the rest of the session (Phase 18). */
+  presentDecisionPoint: (decisionPointId: string) => void
+  /** Resolves the pending decision point by running the picked option's real effect, deriving its tone from that real outcome, and logging one decision-tagged marker entry (Phase 18). */
+  chooseDecisionOption: (optionId: string) => void
+  /** Declines to act on a pending decision point for now — no LogEntry (nothing happened); it stays marked shown, so it won't re-fire. */
+  dismissDecisionPoint: () => void
   /** Declines a pending pacing offer for now — no LogEntry, resumes manual titration. */
   dismissPacingOffer: () => void
-  /** Runs a guided multi-step titration leap toward targetDose for the checkpoint's (or pacing offer's) order, one correctly-spaced dose + auto-chart entry per step. */
-  runGuidedTitrationLeap: (orderId: string, targetDose: number) => void
+  /** Runs a multi-step titration plan toward targetDose for the decision point's (or pacing offer's) order, one correctly-spaced dose + auto-chart entry per step. */
+  runMultiStepTitration: (orderId: string, targetDose: number) => void
   notifyProvider: (orderId: string, reason?: string) => void
   chartVitals: () => void
   /** Backdates a chart entry to a past minute, auto-filling the vitals actually recorded then (vitalsHistory) — never freely entered or graded on recall. */
@@ -443,7 +543,8 @@ function initialSimFields(
     activeBlockOfCharting: null as BlockOfChartingRecord | null,
     blockOfChartingHistory: [] as BlockOfChartingRecord[],
     pendingOverride: null as PendingOverride | null,
-    pendingCheckpoint: null as PendingCheckpoint | null,
+    pendingDecisionPoint: null as PendingDecisionPoint | null,
+    decisionPointsShown: {} as Record<string, boolean>,
     pacingTitrationsSinceOffer: {} as Record<string, number>,
     pendingPacingOffer: null as PendingPacingOffer | null,
     vitalsHistory: [{ minute: 0, vitals: { ...scenario.startingVitals } }],
@@ -595,10 +696,10 @@ export const useSimStore = create<SimStore>((set, get) => ({
     }))
   },
 
-  submitDose: (orderId, dose) => {
+  submitDose: (orderId, dose, opts) => {
     const state = get()
     const order = state.orders.find((o) => o.id === orderId)
-    if (!order || state.phase !== 'sim') return
+    if (!order || state.phase !== 'sim') return null
     const drug = getDrug(order.drugId)
     const infusion = state.infusions.find((i) => i.orderId === orderId) ?? null
     const action: TitrationAction = !infusion || infusion.status === 'hanging' ? 'initiate' : 'titrate'
@@ -611,7 +712,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           message: `Complete Begin Bag verification for ${drug.name} in the MAR before starting this infusion.`,
         },
       })
-      return
+      return null
     }
 
     if (infusion && infusion.status === 'stopped') {
@@ -622,7 +723,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           message: `${drug.name} is paused — restart at the prior rate, or discontinue, before titrating.`,
         },
       })
-      return
+      return null
     }
 
     // Block of Charting (CP 4-156's emergent pathway): once declared for THIS order, the
@@ -660,8 +761,13 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
     // Off-order in training mode needs a learner decision before the outcome is final —
     // deferred here rather than logged-then-patched, since a written LogEntry is never
-    // mutated elsewhere in this codebase (faithful audit trail).
-    if (outcome === 'off-order' && state.mode === 'training') {
+    // mutated elsewhere in this codebase (faithful audit trail). Skipped when the pick
+    // came from a decision panel (opts.fromDecisionPanel) — the option's own authored
+    // feedback already explains the "why," so a second confirmation modal on top of the
+    // decision card would be redundant; falls through to the same silent-apply path
+    // validation mode already uses. A normal, non-decision-panel manual titration is
+    // completely unaffected by this flag.
+    if (outcome === 'off-order' && state.mode === 'training' && !opts?.fromDecisionPanel) {
       set({
         pendingOverride: {
           orderId,
@@ -672,7 +778,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           guardrailStatus: guardEval.status,
         },
       })
-      return
+      return null
     }
 
     // Validation mode applies an off-order dose silently — a real Alaris pump doesn't
@@ -723,7 +829,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
           message: `The Alaris pump will not accept ${dose} ${drug.unit} — outside the configured hard limit (${guardEval.limits.hardMin}-${guardEval.limits.hardMax} ${drug.unit}).`,
         },
       })
-      return
+      return entry
     }
 
     if (finalOutcome === 'needs-provider') {
@@ -733,25 +839,35 @@ export const useSimStore = create<SimStore>((set, get) => ({
             ? { tone: 'warning', title: 'Notify the provider', message: result.reasons.join(' ') }
             : { tone: 'danger', title: 'Not accepted', message: 'This dose was not accepted. Reassess and try again.' },
       })
-      return
+      return entry
     }
 
-    // finalOutcome === 'applied' — a clean order-compliant dose, or a validation-mode
-    // silent override (see `overridden` above).
+    // finalOutcome === 'applied' — a clean order-compliant dose, or a validation-mode/
+    // decision-panel silent override (see `overridden` above).
     set((s) => computeApplyUpdate(s, order, drug, infusion, action, dose))
 
-    // Precedence: the early-notification checkpoint (if newly crossed) wins over the
-    // routine post-titrate prompt — it opens an interactive decision panel instead of
-    // just a toast (see TitrationCheckpointPanel), replacing the old
-    // buildEarlyNotificationFeedback toast entirely. The routine post-titrate prompt
-    // itself replaces the old generic "Titration applied" — naming the interval and
-    // prompting reassessment rather than just confirming the dose landed. Initiate
-    // keeps its own distinct message (it's not itself an interval to reassess after).
+    // Precedence: a triggered decision point (if any — see deriveTriggeredDecisionPointId)
+    // wins over the routine post-titrate prompt, opening the interactive decision card
+    // instead of just a toast. The routine post-titrate prompt itself names the interval
+    // and prompts reassessment rather than just confirming the dose landed. Initiate keeps
+    // its own distinct message (it's not itself an interval to reassess after).
     // advanceClock's own more-urgent overrides (2hr-stopped, 4hr-block, deterioration-
     // started) still get final say, unchanged, since it runs after this and only
     // overwrites `feedback` when one of those newly applies.
-    if (crossedEarlyThreshold) {
-      set({ pendingCheckpoint: { orderId: order.id, doseAtTrigger: dose, mapAtTrigger: state.vitals.map, triggeredAtMinute: state.clockMinutes } })
+    const freshAfterApply = get()
+    const triggeredDecisionPointId = deriveTriggeredDecisionPointId(
+      freshAfterApply.scenario,
+      freshAfterApply.orders,
+      freshAfterApply.infusions,
+      freshAfterApply.vitals,
+      freshAfterApply.decisionPointsShown,
+      order.id,
+      infusion?.rate ?? 0,
+      dose,
+      action,
+    )
+    if (triggeredDecisionPointId) {
+      get().presentDecisionPoint(triggeredDecisionPointId)
     } else if (action === 'titrate') {
       set({
         feedback: {
@@ -781,6 +897,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
     // driven-vs-auto pacing toggle is planned for Phase 10 — auto is the only mode until
     // then.
     get().advanceClock(order.interval.minMinutes)
+
+    return entry
   },
 
   confirmDoseOverride: () => {
@@ -824,17 +942,22 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
     set((s) => computeApplyUpdate(s, order, drug, infusion, pending.action, pending.dose))
 
-    // Same precedence as submitDose's applied path: the early-notification checkpoint,
-    // if newly crossed, wins over the routine "applied via override" confirmation.
-    if (crossedEarlyThreshold) {
-      set({
-        pendingCheckpoint: {
-          orderId: order.id,
-          doseAtTrigger: pending.dose,
-          mapAtTrigger: state.vitals.map,
-          triggeredAtMinute: state.clockMinutes,
-        },
-      })
+    // Same precedence as submitDose's applied path: a triggered decision point, if any,
+    // wins over the routine "applied via override" confirmation.
+    const freshAfterApply = get()
+    const triggeredDecisionPointId = deriveTriggeredDecisionPointId(
+      freshAfterApply.scenario,
+      freshAfterApply.orders,
+      freshAfterApply.infusions,
+      freshAfterApply.vitals,
+      freshAfterApply.decisionPointsShown,
+      order.id,
+      infusion?.rate ?? 0,
+      pending.dose,
+      pending.action,
+    )
+    if (triggeredDecisionPointId) {
+      get().presentDecisionPoint(triggeredDecisionPointId)
     } else {
       set({
         feedback: {
@@ -882,46 +1005,134 @@ export const useSimStore = create<SimStore>((set, get) => ({
     }))
   },
 
-  dismissCheckpoint: () => set({ pendingCheckpoint: null }),
+  presentDecisionPoint: (decisionPointId) =>
+    set((s) => ({
+      pendingDecisionPoint: { decisionPointId },
+      decisionPointsShown: { ...s.decisionPointsShown, [decisionPointId]: true },
+    })),
+
+  chooseDecisionOption: (optionId) => {
+    const state = get()
+    const pending = state.pendingDecisionPoint
+    const dp = pending
+      ? resolveDecisionPoint(state.scenario.decisionPoints ?? [], state.orders, pending.decisionPointId)
+      : null
+    const option = dp?.options.find((o) => o.id === optionId)
+    if (!dp || !option) return
+    set({ pendingDecisionPoint: null })
+
+    // Declining to act — no LogEntry, no scoring impact, the learner just resumes free
+    // titration via the real dose-entry control. Doesn't unmark decisionPointsShown
+    // (that already happened in presentDecisionPoint), so this specific point can't
+    // re-fire, matching every other pick's once-per-session behavior.
+    if (option.effect.kind === 'resumeManual') return
+
+    // Tone is derived from the REAL effect's outcome wherever one exists — never
+    // hand-authored (see DecisionTone's doc comment in state/types.ts). Each effect
+    // kind reuses an existing store action verbatim; a decision point never bypasses
+    // the real engine, it just offers a menu of real actions to choose from.
+    let tone: DecisionTone
+    const effect = option.effect
+    switch (effect.kind) {
+      case 'submitDose': {
+        const entry = get().submitDose(effect.orderId, effect.dose, { fromDecisionPanel: true })
+        tone = entry ? toneFromDoseOutcome(entry.outcome, entry.overridden) : 'critical'
+        break
+      }
+      case 'submitDoseRelative': {
+        const relOrder = get().orders.find((o) => o.id === effect.orderId)
+        const relInfusion = get().infusions.find((i) => i.orderId === effect.orderId)
+        const base = relInfusion?.rate ?? relOrder?.startDose ?? 0
+        const dose = relOrder ? Math.round((base + effect.deltaSteps * relOrder.increment) * 1e6) / 1e6 : base
+        const entry = get().submitDose(effect.orderId, dose, { fromDecisionPanel: true })
+        tone = entry ? toneFromDoseOutcome(entry.outcome, entry.overridden) : 'critical'
+        break
+      }
+      case 'multiStepTitration': {
+        const before = get().infusions.find((i) => i.orderId === effect.orderId)?.rate ?? 0
+        get().runMultiStepTitration(effect.orderId, effect.targetDose)
+        const after = get().infusions.find((i) => i.orderId === effect.orderId)?.rate ?? 0
+        tone = after !== before ? 'good' : 'caution'
+        break
+      }
+      case 'notifyProvider':
+        get().notifyProvider(effect.orderId, `Decision point: ${option.label}`)
+        tone = 'good'
+        break
+      case 'chartVitals':
+        get().chartVitals()
+        tone = 'good'
+        break
+      case 'none':
+        tone = option.manualTone ?? 'critical'
+        break
+    }
+
+    const markerEntry: LogEntry = {
+      id: nextId('log'),
+      minute: get().clockMinutes,
+      type: 'action',
+      summary: `Decision (${dp.trapType}): chose "${option.label}".`,
+      decisionPointId: dp.id,
+      decisionOptionId: option.id,
+      decisionTone: tone,
+    }
+    set((s) => ({ log: [...s.log, markerEntry] }))
+
+    set({
+      feedback:
+        get().mode === 'training'
+          ? {
+              tone: tone === 'good' ? 'success' : tone === 'caution' ? 'warning' : 'danger',
+              title: option.label,
+              message: option.feedback.text,
+            }
+          : { tone: 'info', title: 'Choice recorded', message: 'This decision is reviewed at debrief.' },
+    })
+  },
+
+  dismissDecisionPoint: () => set({ pendingDecisionPoint: null }),
 
   dismissPacingOffer: () => set({ pendingPacingOffer: null }),
 
-  runGuidedTitrationLeap: (orderId, targetDose) => {
-    const state = get()
-    const matchesCheckpoint = state.pendingCheckpoint?.orderId === orderId
-    const matchesPacingOffer = state.pendingPacingOffer?.orderId === orderId
-    if (!matchesCheckpoint && !matchesPacingOffer) return
+  runMultiStepTitration: (orderId, targetDose) => {
+    // No pending-state guard here (unlike the retired runGuidedTitrationLeap's
+    // checkpoint/pacing-offer match) — this action now has two legitimate callers:
+    // chooseDecisionOption (which already clears pendingDecisionPoint before calling
+    // this, by design — see there) and PacingOfferPanel's "Apply these steps" button
+    // (only ever rendered for the order its own pendingPacingOffer names). Both are
+    // UI-trusted call paths; the real safety check that matters is below (a real,
+    // currently-infusing order to act on).
     const order = get().orders.find((o) => o.id === orderId)
     const infusion = get().infusions.find((i) => i.orderId === orderId)
-    set({ pendingCheckpoint: null, pendingPacingOffer: null })
+    // Idempotent with chooseDecisionOption's own clear (redundant on that call path,
+    // but this action can also be invoked directly — e.g. a test or a future UI call
+    // site driving it straight from a still-pending decision point) — always leaves
+    // both pending-panel fields clear before running.
+    set({ pendingPacingOffer: null, pendingDecisionPoint: null })
     if (!order || !infusion || infusion.status !== 'infusing') return
     const drug = getDrug(order.drugId)
-    const plan = computeGuidedLeapDoses(infusion.rate, order.increment, order.maxDose, targetDose)
+    const plan = computeMultiStepDoses(infusion.rate, order.increment, order.maxDose, targetDose)
 
     let appliedCount = 0
-    let interruptedByCheckpoint = false
+    let interruptedByDecisionPoint = false
     for (const dose of plan.doses) {
       const s = get()
       if (meetsTarget(s.vitals.map, order.target)) break
       const currentInfusion = s.infusions.find((i) => i.orderId === orderId) ?? null
-      // A leap that starts below the clinical threshold (e.g. from a pacing offer, unlike
-      // the clinical checkpoint's own leap, which always starts AT the crossing dose) can
-      // cross it mid-flight — check every step, not just once at the start.
-      const crossedThisStep = crossedEarlyNotificationThreshold(order, currentInfusion?.rate ?? 0, dose, s.vitals.map)
       const actionEntry: LogEntry = {
         id: nextId('log'),
         minute: s.clockMinutes,
         type: 'action',
-        summary: `Titrate ${drug.name} to ${dose} ${drug.unit} — applied (guided titration leap).`,
+        summary: `Titrate ${drug.name} to ${dose} ${drug.unit} — applied (auto-charted, multi-step).`,
         orderId: order.id,
         drugId: order.drugId,
         doseAction: 'titrate',
         dose,
         outcome: 'applied',
-        autoGeneratedByLeap: true,
-        earlyNotificationDue: crossedThisStep || undefined,
+        autoGeneratedByMultiStep: true,
       }
-      const vitalsEntry: LogEntry = { ...buildVitalsLogEntry(s.clockMinutes, s.vitals, s.clockMinutes), autoGeneratedByLeap: true }
+      const vitalsEntry: LogEntry = { ...buildVitalsLogEntry(s.clockMinutes, s.vitals, s.clockMinutes), autoGeneratedByMultiStep: true }
       const applyUpdate = computeApplyUpdate(s, order, drug, currentInfusion, 'titrate', dose)
       set({
         infusions: applyUpdate.infusions,
@@ -931,27 +1142,42 @@ export const useSimStore = create<SimStore>((set, get) => ({
       })
       appliedCount += 1
       get().advanceClock(order.interval.minMinutes)
-      if (crossedThisStep) {
-        // Stop here — the same real decision a manually-titrating nurse would hit at this
-        // exact dose takes over; no "leap complete" toast competing with the checkpoint.
-        set((st) => ({
-          pendingCheckpoint: { orderId: order.id, doseAtTrigger: dose, mapAtTrigger: s.vitals.map, triggeredAtMinute: s.clockMinutes },
-          pacingTitrationsSinceOffer: { ...st.pacingTitrationsSinceOffer, [orderId]: 0 },
-        }))
-        interruptedByCheckpoint = true
+
+      // A plan that starts below a real decision-point trigger (e.g. from a pacing
+      // offer, unlike a decision option's own plan, which always starts AT the
+      // crossing dose) can cross one mid-flight — check every step, not just once at
+      // the start (see deriveTriggeredDecisionPointId).
+      const fresh = get()
+      const triggeredId = deriveTriggeredDecisionPointId(
+        fresh.scenario,
+        fresh.orders,
+        fresh.infusions,
+        fresh.vitals,
+        fresh.decisionPointsShown,
+        orderId,
+        currentInfusion?.rate ?? 0,
+        dose,
+        'titrate',
+      )
+      if (triggeredId) {
+        // Stop here — the same real decision a manually-titrating nurse would hit at
+        // this exact dose takes over; no "steps applied" toast competing with the card.
+        get().presentDecisionPoint(triggeredId)
+        set((st) => ({ pacingTitrationsSinceOffer: { ...st.pacingTitrationsSinceOffer, [orderId]: 0 } }))
+        interruptedByDecisionPoint = true
         break
       }
     }
 
-    if (!interruptedByCheckpoint) {
+    if (!interruptedByDecisionPoint) {
       const finalRate = get().infusions.find((i) => i.orderId === orderId)?.rate
       set({
         feedback:
           appliedCount > 0
             ? {
                 tone: 'success',
-                title: 'Guided titration complete',
-                message: `${drug.name} titrated to ${finalRate} ${drug.unit} over ${appliedCount} step${appliedCount === 1 ? '' : 's'}. Review the timeline for each step's charted vitals.`,
+                title: 'Multi-step titration complete',
+                message: `${drug.name} titrated to ${finalRate} ${drug.unit} over ${appliedCount} step${appliedCount === 1 ? '' : 's'}. Review the history for each step's charted vitals.`,
               }
             : {
                 tone: 'info',
@@ -1127,6 +1353,21 @@ export const useSimStore = create<SimStore>((set, get) => ({
       deteriorationOffset: nextDeteriorationOffset,
       feedback,
     })
+
+    // Phase 18: MAP reaching target is fundamentally a clock event — check the
+    // 'weanEligible' trigger here too, not just after a dose (see
+    // deriveWeanEligibleDecisionPointId's doc comment for why this half is needed).
+    if (!get().pendingDecisionPoint) {
+      const freshAfterTick = get()
+      const weanTriggeredId = deriveWeanEligibleDecisionPointId(
+        freshAfterTick.scenario,
+        freshAfterTick.orders,
+        freshAfterTick.infusions,
+        freshAfterTick.vitals,
+        freshAfterTick.decisionPointsShown,
+      )
+      if (weanTriggeredId) get().presentDecisionPoint(weanTriggeredId)
+    }
   },
 
   pauseInfusion: (infusionId) => {

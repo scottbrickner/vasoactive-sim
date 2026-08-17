@@ -11,8 +11,8 @@ export interface ChartedVitalsEntry {
   vitals: VitalSigns
   /** True when this entry was backdated via the titration timeline rather than charted live. */
   retrospective?: boolean
-  /** True when this entry was auto-charted by a guided titration leap rather than charted individually. */
-  guided?: boolean
+  /** True when this entry was auto-charted by a multi-step titration plan rather than charted individually. */
+  autoCharted?: boolean
 }
 
 export interface CernerIViewProps {
@@ -71,7 +71,7 @@ export function CernerIView({
   const liveColumns = [...chartedEntries]
     .sort((a, b) => a.minute - b.minute)
     .map((e) => {
-      const tags = [e.retrospective && 'backdated', e.guided && 'guided'].filter(Boolean).join(', ')
+      const tags = [e.retrospective && 'backdated', e.autoCharted && 'auto-charted'].filter(Boolean).join(', ')
       return { label: tags ? `${formatClock(e.minute)} (${tags})` : formatClock(e.minute), vitals: e.vitals, minute: e.minute }
     })
   const columns = [...historicalColumns, startColumn, ...liveColumns]

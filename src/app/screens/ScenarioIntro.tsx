@@ -94,7 +94,8 @@ export function ScenarioIntro() {
       <Panel title="Learner identity">
         <p className="text-sm text-muted">
           Required to begin a Validation-mode run; optional for Training. Saved on this browser and
-          reused next time.
+          reused next time. Every attempt is recorded automatically when you reach debrief — enter your
+          institutional email to also get a results summary emailed to you.
         </p>
         <div className="mt-3 grid gap-4 sm:grid-cols-2">
           <Field

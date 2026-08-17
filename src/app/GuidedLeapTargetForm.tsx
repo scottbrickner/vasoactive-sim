@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { computeGuidedLeapDoses } from '../engine/titrationEngine'
+import { computeMultiStepDoses } from '../engine/titrationEngine'
 import { Button, Field } from '../design/primitives'
 import type { DrugDefinition, Order } from '../state/types'
 
@@ -7,7 +7,7 @@ export interface GuidedLeapTargetFormProps {
   order: Order
   drug: DrugDefinition
   currentDose: number
-  /** Prefilled target dose — the order's own max for the clinical checkpoint, or the nearest upcoming milestone for a pacing offer. */
+  /** Prefilled target dose — the order's own max for the "continue titrating" decision-point option, or the nearest upcoming milestone for a pacing offer. */
   defaultTarget: number
   onRun: (targetDose: number) => void
   onBack: () => void
@@ -15,15 +15,16 @@ export interface GuidedLeapTargetFormProps {
 }
 
 /**
- * Target-dose entry + live guided-leap preview, shared by TitrationCheckpointPanel (the
- * clinical early-notification decision) and PacingOfferPanel (a non-clinical pacing
- * nudge) — both end in the exact same "pick a target, preview the steps, run it" flow,
- * just reached via different framing/copy in their own panel chrome.
+ * Target-dose entry + live multi-step titration-plan preview, shared by DecisionCard's
+ * "continue titrating" option (a real clinical decision) and PacingOfferPanel (a
+ * non-clinical pacing nudge) — both end in the exact same "pick a target, preview the
+ * steps, run it" flow, just reached via different framing/copy in their own panel
+ * chrome. (Renamed from computeGuidedLeapDoses in Phase 18 — see titrationEngine.ts.)
  */
 export function GuidedLeapTargetForm({ order, drug, currentDose, defaultTarget, onRun, onBack, backLabel = 'Back' }: GuidedLeapTargetFormProps) {
   const [targetInput, setTargetInput] = useState(String(defaultTarget))
   const targetDose = Number(targetInput)
-  const plan = computeGuidedLeapDoses(currentDose, order.increment, order.maxDose, targetDose)
+  const plan = computeMultiStepDoses(currentDose, order.increment, order.maxDose, targetDose)
 
   return (
     <div className="flex flex-col gap-4">
@@ -53,7 +54,7 @@ export function GuidedLeapTargetForm({ order, drug, currentDose, defaultTarget, 
       )}
       <div className="flex gap-3">
         <Button disabled={plan.doses.length === 0} onClick={() => onRun(targetDose)}>
-          Run guided titration
+          Apply these steps
         </Button>
         <Button variant="ghost" onClick={onBack}>
           {backLabel}

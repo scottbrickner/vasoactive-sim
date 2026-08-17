@@ -1,13 +1,10 @@
 import { cerner } from '../../design/deviceTokens'
 import { getDrug } from '../../data/formulary'
+import { formatInterval } from '../../engine/orderText'
 import type { Order } from '../../state/types'
 
 export interface OrdersProfileProps {
   orders: Order[]
-}
-
-function formatInterval(interval: Order['interval']): string {
-  return interval.maxMinutes ? `q${interval.minMinutes}-${interval.maxMinutes} min` : `q${interval.minMinutes} min`
 }
 
 /** Faithful (not stylized) replica of the Cerner Orders profile — the titratable order(s). */

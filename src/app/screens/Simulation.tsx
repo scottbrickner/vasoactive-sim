@@ -4,21 +4,16 @@ import { priorAgentsActivationMet, useSimStore, type PendingOverride } from '../
 import { useSkillTrackingStore } from '../../state/skillTrackingStore'
 import { getDrug } from '../../data/formulary'
 import { buildOutstandingChartingItems } from '../../engine/documentation'
+import { resolveDecisionPoint } from '../../engine/decisionPoints'
 import { scoreSession } from '../../engine/scoring'
-import {
-  AlarisPump,
-  CernerChartingStatus,
-  CernerIView,
-  CernerMAR,
-  InfusionsPanel,
-  OrdersProfile,
-  PhilipsMonitor,
-  type ChartedVitalsEntry,
-  type PumpChannelInfo,
-} from '../../devices'
+import { CernerChartingStatus, CernerMAR, InfusionsPanel, type PumpChannelInfo } from '../../devices'
+import { DecisionCard } from '../DecisionCard'
+import { DoseEntryControl } from '../DoseEntryControl'
+import { OrdersReferenceCard } from '../OrdersReferenceCard'
+import { StatusStrip } from '../StatusStrip'
+import { TitrationVitalsHistory } from '../TitrationVitalsHistory'
 import { VerificationPanel } from '../VerificationPanel'
 import { OverrideConfirmPanel } from '../OverrideConfirmPanel'
-import { TitrationCheckpointPanel } from '../TitrationCheckpointPanel'
 import { PacingOfferPanel } from '../PacingOfferPanel'
 import { SubmitConfirmPanel } from '../SubmitConfirmPanel'
 import { ProviderNotifyControl } from '../ProviderNotifyControl'
@@ -64,10 +59,7 @@ function buildOverrideTitle(pending: PendingOverride, orders: Order[]): string {
  * Which order "Notify provider" should target — whichever order has an outstanding
  * needs-provider or early-notification event (mirrors scoring.ts category 6's
  * satisfied-by-later-notification check, so the button and the scorecard agree on what
- * counts as satisfied), falling back to sequence 1 when nothing is outstanding. Fixes a
- * real bug: this used to always hardcode sequence 1, so a needs-provider/early-
- * notification event on any later-sequence order could never be satisfied no matter
- * what the learner did.
+ * counts as satisfied), falling back to sequence 1 when nothing is outstanding.
  */
 function findOutstandingNotificationOrderId(log: LogEntry[], orders: Order[]): string | undefined {
   const neededEvents = log.filter((e) => e.type === 'action' && (e.outcome === 'needs-provider' || e.earlyNotificationDue))
@@ -82,10 +74,15 @@ function findOutstandingNotificationOrderId(log: LogEntry[], orders: Order[]): s
 const CLOCK_ADVANCE_OPTIONS = [3, 5, 30]
 
 /**
- * Bedside workspace — Phase 5: the full wired loop. Decision -> BCMA/I-TRACE verification
- * (single-nurse — vasoactives are not high-alert here, see CLAUDE.md) -> dose entry
- * (Guardrails + order checked) -> physiologic response -> documentation at a checkpoint
- * the learner judges themselves (never labeled in the UI) -> inline, non-punitive feedback.
+ * Bedside workspace — Phase 18's "clean workspace" redesign. Real hands-on dose entry
+ * (DoseEntryControl) stays the primary, always-available interaction; a contextual
+ * "what's your next move" decision card (DecisionCard) is layered on top, triggered by
+ * real scenario progress (see state/store.ts's deriveTriggeredDecisionPointId) — not a
+ * replacement for free titration. Replaces Phase 17's photorealistic device replicas
+ * (PhilipsMonitor/AlarisPump/CernerIView) for THIS screen; those components stay in the
+ * codebase, unrouted here, still importable. CernerMAR/InfusionsPanel/
+ * CernerChartingStatus/TitrationTimeline are reused as-is — see each file's own doc
+ * comment for why they still fit this screen unchanged.
  */
 export function Simulation() {
   const setPhase = useSimStore((s) => s.setPhase)
@@ -117,18 +114,20 @@ export function Simulation() {
   const pendingOverride = useSimStore((s) => s.pendingOverride)
   const confirmDoseOverride = useSimStore((s) => s.confirmDoseOverride)
   const cancelDoseOverride = useSimStore((s) => s.cancelDoseOverride)
-  const pendingCheckpoint = useSimStore((s) => s.pendingCheckpoint)
-  const dismissCheckpoint = useSimStore((s) => s.dismissCheckpoint)
+  const pendingDecisionPoint = useSimStore((s) => s.pendingDecisionPoint)
+  const chooseDecisionOption = useSimStore((s) => s.chooseDecisionOption)
+  const dismissDecisionPoint = useSimStore((s) => s.dismissDecisionPoint)
   const pendingPacingOffer = useSimStore((s) => s.pendingPacingOffer)
   const dismissPacingOffer = useSimStore((s) => s.dismissPacingOffer)
-  const runGuidedTitrationLeap = useSimStore((s) => s.runGuidedTitrationLeap)
+  const runMultiStepTitration = useSimStore((s) => s.runMultiStepTitration)
   const recordAttempt = useSkillTrackingStore((s) => s.recordAttempt)
 
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null)
   const [showSubmitConfirm, setShowSubmitConfirm] = useState(false)
   const [advanceConfirm, setAdvanceConfirm] = useState<{ tick: number; message: string } | null>(null)
+  const [chartConfirm, setChartConfirm] = useState<number | null>(null)
   const locked =
-    pendingAction !== null || pendingOverride !== null || pendingCheckpoint !== null || pendingPacingOffer !== null
+    pendingAction !== null || pendingOverride !== null || pendingDecisionPoint !== null || pendingPacingOffer !== null
 
   function handleAdvanceClock(byMinutes: number) {
     advanceClock(byMinutes)
@@ -148,15 +147,6 @@ export function Simulation() {
       }
     })
 
-  const chartedEntries: ChartedVitalsEntry[] = log
-    .filter((e) => e.type === 'documentation' && e.location === 'iView' && e.vitalsSnapshot)
-    .map((e) => ({
-      minute: e.minute,
-      vitals: e.vitalsSnapshot!,
-      retrospective: e.retrospective,
-      guided: e.autoGeneratedByLeap,
-    }))
-
   function handleConfirm() {
     if (!pendingAction) return
     submitDose(pendingAction.orderId, pendingAction.dose)
@@ -164,12 +154,14 @@ export function Simulation() {
   }
 
   const outstandingItems = buildOutstandingChartingItems(orders, infusions, log, verificationFlags)
+  const decisionPoint = pendingDecisionPoint
+    ? resolveDecisionPoint(scenario.decisionPoints ?? [], orders, pendingDecisionPoint.decisionPointId)
+    : null
+  const primaryOrder = orders.find((o) => o.sequence === 1)
 
   // Records this run (training or validation) into the skill-tracking store (Phase 15)
   // right before every debrief arrival — a separate store from useSimStore, so a
   // facilitated session's cross-window state broadcast (Phase 10) never overwrites it.
-  // Only a validation-mode pass counts as meeting the skill sign-off requirement; see
-  // engine/skillAttempt.ts's buildAttemptRecord.
   function recordThisAttempt() {
     const card = scoreSession({ orders, infusions, log, verificationFlags, adherenceFlags, blockOfChartingHistory })
     recordAttempt({ card, scenarioId: scenario.id, scenarioLabel: scenario.admissionReason, mode })
@@ -194,7 +186,8 @@ export function Simulation() {
         <p className="text-sm font-semibold tracking-wide text-cardinal uppercase">Simulation</p>
         <h1 className="mt-1 text-3xl font-bold text-ink">Bedside workspace</h1>
         <p className="mt-2 max-w-2xl text-lg text-muted">
-          Program and titrate exactly as ordered, document per policy, and get coached along the way.
+          Program and titrate exactly as ordered, document per policy, and think through your next move as the case
+          advances.
         </p>
       </div>
 
@@ -222,26 +215,6 @@ export function Simulation() {
         />
       )}
 
-      {pendingCheckpoint &&
-        (() => {
-          const order = orders.find((o) => o.id === pendingCheckpoint.orderId)
-          if (!order) return null
-          return (
-            <TitrationCheckpointPanel
-              order={order}
-              drug={getDrug(order.drugId)}
-              doseAtTrigger={pendingCheckpoint.doseAtTrigger}
-              mapAtTrigger={pendingCheckpoint.mapAtTrigger}
-              onNotifyProvider={() => {
-                notifyProvider(order.id)
-                dismissCheckpoint()
-              }}
-              onRunGuidedLeap={(targetDose) => runGuidedTitrationLeap(order.id, targetDose)}
-              onCancel={dismissCheckpoint}
-            />
-          )
-        })()}
-
       {pendingPacingOffer &&
         (() => {
           const order = orders.find((o) => o.id === pendingPacingOffer.orderId)
@@ -253,7 +226,7 @@ export function Simulation() {
               currentDose={pendingPacingOffer.currentDose}
               nextDecisionDose={pendingPacingOffer.nextDecisionDose}
               nextDecisionLabel={pendingPacingOffer.nextDecisionLabel}
-              onRunGuidedLeap={(targetDose) => runGuidedTitrationLeap(order.id, targetDose)}
+              onRunMultiStepTitration={(targetDose) => runMultiStepTitration(order.id, targetDose)}
               onCancel={dismissPacingOffer}
             />
           )
@@ -272,7 +245,7 @@ export function Simulation() {
         />
       )}
 
-      <PhilipsMonitor vitals={vitals} startingVitals={scenario.startingVitals} />
+      <StatusStrip clockMinutes={clockMinutes} vitals={vitals} targetLabel={primaryOrder ? `${primaryOrder.target.metric} ≥ ${primaryOrder.target.value} ${primaryOrder.target.unit}` : undefined} />
 
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface p-3 shadow-sm">
         <span className="text-sm font-semibold text-ink">Advance time</span>
@@ -291,26 +264,35 @@ export function Simulation() {
         </p>
       </div>
 
-      {/*
-        Phase 17: the Alaris ganged pump array (central module + up to 4 channel
-        modules) needs real width to avoid horizontal scrolling — confirmed via a
-        3-channel scenario that its natural width (~1050px) badly overflows a
-        two-column grid's half-width cell (~540px). Render it full-width, same as
-        PhilipsMonitor above, rather than as the first item in the left column.
-      */}
-      <AlarisPump
-        channels={channels}
-        clockMinutes={clockMinutes}
-        disabled={locked}
-        onRequestProgram={(orderId, dose) => setPendingAction({ kind: 'initiate', orderId, dose })}
-        onTitrate={(orderId, dose) => submitDose(orderId, dose)}
-        onPause={pauseInfusion}
-        onRestart={restartInfusion}
-        onDiscontinue={discontinueInfusion}
-      />
+      <div className="grid gap-3 sm:grid-cols-2">
+        {channels.map((info) => (
+          <DoseEntryControl
+            key={info.order.id}
+            info={info}
+            onRequestProgram={(orderId, dose) => setPendingAction({ kind: 'initiate', orderId, dose })}
+            onTitrate={(orderId, dose) => submitDose(orderId, dose)}
+            onPause={pauseInfusion}
+            onRestart={restartInfusion}
+            onDiscontinue={discontinueInfusion}
+            disabled={locked}
+          />
+        ))}
+      </div>
+
+      {decisionPoint && (
+        <DecisionCard
+          decisionPoint={decisionPoint}
+          mode={mode}
+          onChoose={chooseDecisionOption}
+          onDecideLater={dismissDecisionPoint}
+        />
+      )}
+
+      <TitrationVitalsHistory log={log} vitalsHistory={vitalsHistory} />
 
       <div className="grid gap-gutter md:grid-cols-2">
         <div className="flex flex-col gap-gutter">
+          <OrdersReferenceCard orders={orders} />
           <InfusionsPanel infusions={infusions} />
           {scenario.enableBlockOfCharting && (
             <BlockOfChartingControl
@@ -332,22 +314,22 @@ export function Simulation() {
           />
         </div>
         <div className="flex flex-col gap-gutter">
-          <OrdersProfile orders={orders} />
-          <CernerMAR
-            infusions={infusions}
-            disabled={locked}
-            onCompleteBeginBag={completeBeginBag}
-          />
-          <CernerIView
-            priorVitals={scenario.priorVitals}
-            startingVitals={scenario.startingVitals}
-            chartedEntries={chartedEntries}
-            orders={orders}
-            infusions={infusions}
-            log={log}
-            canChartNow={!locked}
-            onChartNow={chartVitals}
-          />
+          <CernerMAR infusions={infusions} disabled={locked} onCompleteBeginBag={completeBeginBag} />
+          <div className="flex items-center gap-2 rounded-md border border-border bg-surface p-3 shadow-sm">
+            <span className="text-sm font-medium text-ink">Documentation</span>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={locked}
+              onClick={() => {
+                chartVitals()
+                setChartConfirm((t) => (t ?? 0) + 1)
+              }}
+            >
+              Chart vitals now
+            </Button>
+            <InlineConfirm trigger={chartConfirm} message="Charted" />
+          </div>
           <TitrationTimeline
             log={log}
             vitalsHistory={vitalsHistory}
