@@ -135,11 +135,24 @@ export interface Order {
   activatesWhen?: string
   /**
    * For sequence > 1: fraction (0,1] of the prior agent's own maxDose that activates
-   * this order (target still unmet). Omitted defaults to 1 ("prior agent at its own
-   * max"). See engine/activation.ts's deriveActivationText, which derives
-   * `activatesWhen` from this so the display text can't drift from the real threshold.
+   * this order (prior agent's own target still unmet, by default — see
+   * `activationRequiresPriorTargetMet` for the opposite condition). Omitted defaults to
+   * 1 ("prior agent at its own max"). See engine/activation.ts's deriveActivationText,
+   * which derives `activatesWhen` from this so the display text can't drift from the
+   * real threshold.
    */
   activationThreshold?: number
+  /**
+   * When true, `activationThreshold`'s dose condition is paired with the PRIOR agent's
+   * own target being MET, not unmet — for cross-parameter sequencing (e.g. sedation
+   * activates once analgesia's own goal is *achieved*, per CP4-156.doc's "adequate
+   * analgesia before sedation" principle), as distinct from same-target escalation (e.g.
+   * a second pressor activates because the first alone isn't reaching the shared MAP
+   * target — the default, "still unmet" case). Omit/false preserves that default
+   * escalation semantics; every existing vasoactive scenario relies on the default. See
+   * state/store.ts's priorAgentsActivationMet, the actual comparison this flag governs.
+   */
+  activationRequiresPriorTargetMet?: boolean
   /**
    * Fraction (0,1] of **this order's own** maxDose — distinct from `activationThreshold`,
    * which is about the PRIOR order — that requires provider notification once reached

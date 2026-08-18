@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { combineOrderText, deriveFullOrderText, deriveWeanPriorityText, formatInterval } from '../engine/orderText'
+import { combineOrderText, deriveFullOrderText, deriveWeanPriorityText, formatInterval, formatTargetMetText } from '../engine/orderText'
 import { getDrug } from '../data/formulary'
-import type { Order } from '../state/types'
+import type { Order, TitrationTarget } from '../state/types'
 
 const norepiOrder: Order = {
   id: 'order-norepinephrine-agent1',
@@ -52,20 +52,48 @@ describe('deriveFullOrderText', () => {
   })
 })
 
+describe('formatTargetMetText', () => {
+  it('renders ">=" as "at or above"', () => {
+    const target: TitrationTarget = { metric: 'MAP', comparator: '>=', value: 65, unit: 'mmHg' }
+    expect(formatTargetMetText(target)).toBe('MAP at or above 65 mmHg')
+  })
+
+  it('renders "<=" as "at or below"', () => {
+    const target: TitrationTarget = { metric: 'painScore', comparator: '<=', value: 4, unit: 'score' }
+    expect(formatTargetMetText(target)).toBe('painScore at or below 4 score')
+  })
+
+  it('renders "between" as "within"', () => {
+    const target: TitrationTarget = { metric: 'RASS', comparator: 'between', value: -2, valueHigh: 0, unit: 'score' }
+    expect(formatTargetMetText(target)).toBe('RASS within -2-0 score')
+  })
+})
+
 describe('deriveWeanPriorityText', () => {
   it('is undefined when no order in the set carries a weanOrder', () => {
     expect(deriveWeanPriorityText(norepiOrder, [norepiOrder, vasopressinOrder])).toBeUndefined()
   })
 
-  it('returns the fixed policy sentence when any order carries a weanOrder', () => {
-    const weaned: Order = { ...vasopressinOrder, weanOrder: 1 }
-    expect(deriveWeanPriorityText(norepiOrder, [norepiOrder, weaned])).toBe(
+  it('returns the fixed policy sentence when a REAL wean ordering exists (2+ distinct weanOrder values)', () => {
+    const mainstay: Order = { ...norepiOrder, weanOrder: 2 }
+    const adjunct: Order = { ...vasopressinOrder, weanOrder: 1 }
+    expect(deriveWeanPriorityText(mainstay, [mainstay, adjunct])).toBe(
       'Wean priority: most recently added agent comes off first.',
     )
     // applies to every order in the set, not just the one that carries weanOrder itself
-    expect(deriveWeanPriorityText(weaned, [norepiOrder, weaned])).toBe(
+    expect(deriveWeanPriorityText(adjunct, [mainstay, adjunct])).toBe(
       'Wean priority: most recently added agent comes off first.',
     )
+  })
+
+  // Phase 19h: two agents targeting genuinely independent parameters (e.g. pain score
+  // and RASS) share the SAME weanOrder to mark them independently weanable, with no
+  // forced cross-drug priority — asserting the fixed sentence there would misstate real
+  // practice (see analgosedation.ts and priorAgentsWeaned in state/store.ts).
+  it('is undefined when every wean-tagged order shares the SAME weanOrder (no real ordering, independently weanable)', () => {
+    const a: Order = { ...norepiOrder, weanOrder: 1 }
+    const b: Order = { ...vasopressinOrder, weanOrder: 1 }
+    expect(deriveWeanPriorityText(a, [a, b])).toBeUndefined()
   })
 })
 

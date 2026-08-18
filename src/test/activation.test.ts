@@ -45,6 +45,43 @@ describe('deriveActivationText', () => {
     expect(text).toMatch(/10 mcg\/min/)
     expect(text).toMatch(/33%/)
   })
+
+  // Phase 19h: direct clinical correction — a cross-parameter sequencing case (e.g.
+  // sedation activating once analgesia's OWN target is achieved) is phrased against the
+  // prior order's own target being MET, not still unmet, and against that prior order's
+  // OWN target metric — not the activating order's (they can genuinely differ).
+  it("phrases the condition as MET (not unmet) when activationRequiresPriorTargetMet is set, using the PRIOR order's own target", () => {
+    const fentanylLike: Order = {
+      id: 'order-fentanyl',
+      drugId: 'fentanyl',
+      sequence: 1,
+      startDose: 25,
+      maxDose: 150,
+      increment: 10,
+      interval: { minMinutes: 10 },
+      target: { metric: 'painScore', comparator: '<=', value: 4, unit: 'score' },
+    }
+    const dexLike: Order = {
+      id: 'order-dex',
+      drugId: 'dexmedetomidine',
+      sequence: 2,
+      startDose: 0.2,
+      maxDose: 0.7,
+      increment: 0.1,
+      interval: { minMinutes: 30 },
+      target: { metric: 'RASS', comparator: 'between', value: -2, valueHigh: 0, unit: 'score' },
+      activationThreshold: 25 / 150,
+      activationRequiresPriorTargetMet: true,
+    }
+    const text = deriveActivationText(dexLike, [fentanylLike, dexLike])
+    expect(text).toBe('Fentanyl at 25 mcg/hr (17% of its ordered maximum) with painScore at or below 4 score.')
+  })
+
+  it('the default (activationRequiresPriorTargetMet unset) is unaffected by the multi-prior-order generalization — byte-identical to the original single-`with`-clause phrasing', () => {
+    const order = vasoOrder({ activationThreshold: 1 / 3 })
+    const text = deriveActivationText(order, [norepiOrder, order])
+    expect(text).toBe('Norepinephrine at 10 mcg/min (33% of its ordered maximum) with MAP still < 65 mmHg.')
+  })
 })
 
 // runMultiStepTitration's pacing offer (state/store.ts's PendingPacingOffer) uses this to

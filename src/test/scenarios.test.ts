@@ -258,11 +258,30 @@ describe('scenario — analgosedation', () => {
     expect(dexOrder.activationThreshold).toBeCloseTo(fentanylOrder.startDose / fentanylOrder.maxDose)
   })
 
-  it('weanOrder: dexmedetomidine weans first (1), fentanyl weans last (2) — spontaneous-awakening-trial practice', () => {
+  // Phase 19h: direct clinical correction — dexmedetomidine's dose threshold is paired
+  // with fentanyl's OWN painScore target being MET (analgesia established), not still
+  // unmet. Getting this backwards would make sedation unavailable at exactly the moment
+  // real practice calls for adding it (pain controlled, patient still agitated).
+  it("dexmedetomidine's activation requires fentanyl's OWN target to be MET, not unmet", () => {
+    const dexOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'dexmedetomidine')!
+    expect(dexOrder.activationRequiresPriorTargetMet).toBe(true)
+  })
+
+  it('fentanyl targets no other order (sequence 1) so its own activationRequiresPriorTargetMet is irrelevant/unset', () => {
+    const fentanylOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'fentanyl')!
+    expect(fentanylOrder.activationRequiresPriorTargetMet).toBeUndefined()
+  })
+
+  // Phase 19h: direct clinical correction — pain and sedation are independent
+  // parameters here, so both orders share weanOrder 1 (not a 1/2 sequence): neither
+  // agent is gated behind the other's wean status the way pressors sharing one MAP
+  // target are (see priorAgentsWeaned in state/store.ts — nothing has a STRICTLY lower
+  // weanOrder than anything else, so the "clear priors first" check is a no-op).
+  it('weanOrder: both agents share weanOrder 1 — independently weanable, no cross-drug priority', () => {
     const fentanylOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'fentanyl')!
     const dexOrder = ANALGOSEDATION.orders.find((o) => o.drugId === 'dexmedetomidine')!
     expect(dexOrder.weanOrder).toBe(1)
-    expect(fentanylOrder.weanOrder).toBe(2)
+    expect(fentanylOrder.weanOrder).toBe(1)
   })
 
   it('fentanyl alone, at its ordered maximum, closes the pain-score gap to target', () => {

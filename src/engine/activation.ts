@@ -5,9 +5,20 @@
  * comparison this text describes. Pure — no React/DOM, no store coupling.
  */
 import { getDrug } from '../data/formulary'
-import { formatTargetGapText } from './orderText'
+import { formatTargetGapText, formatTargetMetText } from './orderText'
 import type { Order } from '../state/types'
 
+/**
+ * Phase 19h: the target-status half of each prior order's condition is phrased against
+ * that PRIOR order's OWN target — not `order.target` (the activating order's own target)
+ * — because those two can now be genuinely different metrics (e.g. dexmedetomidine's
+ * RASS target activates once FENTANYL's own painScore target is met, per
+ * `activationRequiresPriorTargetMet`). For every existing same-target escalation
+ * scenario (e.g. norepinephrine -> vasopressin, both MAP), `priorOrder.target` and
+ * `order.target` carry identical values, so this is a behavior-preserving generalization,
+ * not a rewrite — confirmed byte-identical output via orderText.test.ts's existing
+ * fixtures.
+ */
 export function deriveActivationText(order: Order, allOrders: Order[]): string | undefined {
   const priorOrders = allOrders.filter((o) => o.sequence < order.sequence)
   if (priorOrders.length === 0) return undefined
@@ -15,15 +26,21 @@ export function deriveActivationText(order: Order, allOrders: Order[]): string |
   const fraction = order.activationThreshold ?? 1
   const conditions = priorOrders.map((priorOrder) => {
     const drug = getDrug(priorOrder.drugId)
-    if (fraction >= 1) {
-      return `${drug.name} at its ordered maximum (${priorOrder.maxDose} ${drug.unit})`
-    }
-    const thresholdDose = priorOrder.maxDose * fraction
-    const doseText = Number.isInteger(thresholdDose) ? String(thresholdDose) : thresholdDose.toFixed(2)
-    return `${drug.name} at ${doseText} ${drug.unit} (${Math.round(fraction * 100)}% of its ordered maximum)`
+    const doseCondition =
+      fraction >= 1
+        ? `${drug.name} at its ordered maximum (${priorOrder.maxDose} ${drug.unit})`
+        : (() => {
+            const thresholdDose = priorOrder.maxDose * fraction
+            const doseText = Number.isInteger(thresholdDose) ? String(thresholdDose) : thresholdDose.toFixed(2)
+            return `${drug.name} at ${doseText} ${drug.unit} (${Math.round(fraction * 100)}% of its ordered maximum)`
+          })()
+    const targetCondition = order.activationRequiresPriorTargetMet
+      ? formatTargetMetText(priorOrder.target)
+      : formatTargetGapText(priorOrder.target)
+    return `${doseCondition} with ${targetCondition}`
   })
 
-  return `${conditions.join(' and ')} with ${formatTargetGapText(order.target)}.`
+  return `${conditions.join(' and ')}.`
 }
 
 export interface NextDecisionPoint {

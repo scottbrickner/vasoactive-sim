@@ -2092,6 +2092,36 @@ describe('store — Phase 19g decision-point bank (other five scenarios)', () =>
       expect(dexOrder.earlyNotificationThreshold).toBeCloseTo(0.5)
     })
 
+    // Phase 19h: direct clinical correction — the original wiring required fentanyl's
+    // OWN painScore target to be still UNMET for dexmedetomidine to activate (mirroring
+    // same-target escalation, e.g. norepi -> vasopressin), which is backwards for a
+    // cross-parameter case. Real practice adds sedation once analgesia's own goal IS
+    // achieved (activationRequiresPriorTargetMet: true), not while pain remains uncontrolled.
+    describe("cross-parameter activation (dexmedetomidine unlocks once fentanyl's OWN target is MET, not unmet)", () => {
+      beforeEach(() => {
+        useSimStore.getState().completeBeginBag(asFentanylInfusion().id)
+        // Initiates fentanyl at 25 mcg/hr — exactly its own activationThreshold dose
+        // (25/150 fraction * 150 max).
+        useSimStore.getState().submitDose(AS_FENTANYL_ID, 25, { independentCheck: { secondCheckName: 'Test Nurse', secondCheckRole: 'RN' } })
+      })
+
+      it('does NOT activate while fentanyl is at its threshold dose but pain score is still above goal', () => {
+        useSimStore.setState((s) => ({ vitals: { ...s.vitals, painScore: 7 } })) // above goal (<= 4)
+        useSimStore.getState().submitDose(AS_DEX_ID, 0.2)
+        expect(useSimStore.getState().pendingOverride?.violations.sequenceNotActivated).toBe(true)
+        expect(useSimStore.getState().infusions.some((i) => i.drugId === 'dexmedetomidine')).toBe(false)
+      })
+
+      it('activates once fentanyl is at its threshold dose AND pain score is at goal', () => {
+        useSimStore.setState((s) => ({ vitals: { ...s.vitals, painScore: 3 } })) // at goal (<= 4)
+        useSimStore.getState().submitDose(AS_DEX_ID, 0.2)
+        const state = useSimStore.getState()
+        const dex = state.infusions.find((i) => i.drugId === 'dexmedetomidine')
+        expect(dex).toMatchObject({ status: 'infusing', rate: 0.2 })
+        expect(state.feedback).toMatchObject({ tone: 'success', title: 'Infusion started' })
+      })
+    })
+
     describe('postTitrate documentation (fentanyl)', () => {
       beforeEach(() => {
         useSimStore.getState().completeBeginBag(asFentanylInfusion().id)
@@ -2218,19 +2248,31 @@ describe('store — Phase 19g decision-point bank (other five scenarios)', () =>
         expect(useSimStore.getState().pendingDecisionPoint).toEqual({ decisionPointId: 'analgosedation-weaning' })
       })
 
-      it('weaning dexmedetomidine first (correct, weanOrder 1 — sedation before analgesia) derives good tone', () => {
+      // Phase 19h: pain and sedation are independent parameters here — both orders
+      // share weanOrder 1 (not a 1/2 sequence), so EITHER agent may be weaned first,
+      // based on its own target status, with no cross-drug priority gate between them.
+      it('weaning dexmedetomidine first (its own RASS target is met) derives good tone', () => {
         useSimStore.getState().chooseDecisionOption('wean-dexmedetomidine')
         const marker = useSimStore.getState().log.find((e) => e.decisionOptionId === 'wean-dexmedetomidine')!
         expect(marker.decisionTone).toBe('good')
       })
 
-      it('weaning fentanyl first (wrong order — dexmedetomidine not yet cleared) derives critical tone', () => {
+      it('weaning fentanyl first (its own painScore target is ALSO met — no wean-order gate between independent parameters) also derives good tone', () => {
         useSimStore.getState().chooseDecisionOption('wean-fentanyl')
         const state = useSimStore.getState()
         const marker = state.log.find((e) => e.decisionOptionId === 'wean-fentanyl')!
-        expect(marker.decisionTone).toBe('critical')
+        expect(marker.decisionTone).toBe('good')
         const doseEntry = state.log.find((e) => e.orderId === AS_FENTANYL_ID && e.doseAction === 'titrate')!
-        expect(doseEntry.violations?.wrongWeanOrder).toBe(true)
+        expect(doseEntry.violations?.wrongWeanOrder).toBeUndefined()
+      })
+
+      it('increasing dexmedetomidine further once its target is already met derives critical tone (targetAlreadyMet, not a wean-order issue)', () => {
+        useSimStore.getState().chooseDecisionOption('increase-dexmedetomidine')
+        const state = useSimStore.getState()
+        const marker = state.log.find((e) => e.decisionOptionId === 'increase-dexmedetomidine')!
+        expect(marker.decisionTone).toBe('critical')
+        const doseEntry = state.log.find((e) => e.orderId === AS_DEX_ID && e.doseAction === 'titrate')!
+        expect(doseEntry.violations?.targetAlreadyMet).toBe(true)
       })
     })
   })

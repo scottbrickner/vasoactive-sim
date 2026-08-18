@@ -113,7 +113,13 @@ function painScoreContributionFor(infusion: Infusion, scenario: ScenarioConfig):
 /**
  * Sequence > 1 orders activate once every lower-sequence order's infusion is at (or
  * past) `order.activationThreshold` of its own max — defaults to 1 ("at its own max")
- * when omitted — with target still unmet.
+ * when omitted — paired with that PRIOR order's own target being still UNMET by
+ * default (same-target escalation: a second pressor activates because the first alone
+ * isn't reaching the shared MAP goal), or MET when `order.activationRequiresPriorTargetMet`
+ * is set (cross-parameter sequencing: sedation activates once analgesia's own goal is
+ * *achieved*, per CP4-156.doc's "adequate analgesia before sedation" principle — Phase
+ * 19h, added after a direct clinical correction that the original "still unmet" framing
+ * doesn't fit a case where the two orders target genuinely different parameters).
  */
 export function priorAgentsActivationMet(
   infusions: Infusion[],
@@ -134,8 +140,9 @@ export function priorAgentsActivationMet(
     // comparator regardless of the prior order's actual target, a latent bug that never
     // surfaced because every prior-sequence order to date targets MAP with '>=', where
     // "target unmet" (`!meetsTarget`) and "current < value" are exactly equivalent.
-    const targetUnmet = !meetsTarget(resolveTargetValue(vitals, priorOrder.target.metric), priorOrder.target)
-    return atThreshold && targetUnmet
+    const priorTargetMet = meetsTarget(resolveTargetValue(vitals, priorOrder.target.metric), priorOrder.target)
+    const targetCondition = order.activationRequiresPriorTargetMet ? priorTargetMet : !priorTargetMet
+    return atThreshold && targetCondition
   })
 }
 

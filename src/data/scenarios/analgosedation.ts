@@ -5,11 +5,27 @@
  * 61M, 82 kg, post-thoracotomy (lobectomy for lung malignancy) on oncology ICU, still
  * intubated overnight. Fentanyl (agent 1) titrates to pain score; dexmedetomidine
  * (agent 2) titrates to RASS — two genuinely independent targets, not a sequential
- * MAP-only escalation like the flagship. Per CP4-156.doc's own text, sedation is added
- * only once analgesia is *established* (not maxed out): dexmedetomidine activates once
- * fentanyl reaches roughly its own starting dose (25 of 150 mcg/hr — see
- * `activationThreshold` below) with pain score still above goal. `weanOrder` follows
- * real spontaneous-awakening-trial practice: sedation weans first, analgesia last.
+ * MAP-only escalation like the flagship, and this scenario's engine wiring reflects
+ * that independence in two places (Phase 19h correction, per direct clinical feedback):
+ *
+ * - **Activation** — per CP4-156.doc's own text, sedation is added only once analgesia
+ *   is *established* (not maxed out): dexmedetomidine activates once fentanyl reaches
+ *   roughly its own starting dose (25 of 150 mcg/hr — see `activationThreshold` below)
+ *   WITH FENTANYL'S OWN PAIN-SCORE GOAL ALREADY MET (`activationRequiresPriorTargetMet:
+ *   true` — the opposite condition from a same-target escalation like norepinephrine ->
+ *   vasopressin, where the second agent activates because the first alone ISN'T reaching
+ *   the shared goal). Getting this backwards — requiring pain score to still be unmet —
+ *   would make dexmedetomidine unavailable at exactly the moment real practice calls for
+ *   it: once pain is controlled and the patient is still agitated (elevated RASS), it's
+ *   time to add sedation, not withhold it.
+ * - **Weaning** — both orders share `weanOrder: 1` (not a 1/2 sequence): pain and
+ *   sedation are independent parameters here, so there's no fixed cross-drug wean
+ *   priority the way there is among pressors sharing one MAP target (e.g. the flagship's
+ *   norepinephrine/vasopressin pair, where the more-recently-added adjunct always weans
+ *   first). Each agent is weaned on its own timeline, once its own target is met —
+ *   `priorAgentsWeaned`'s "clear every STRICTLY lower-weanOrder agent first" check is a
+ *   structural no-op when nothing has a strictly lower value than anything else, which
+ *   is exactly the "independently weanable" behavior wanted here.
  */
 import type { DecisionPoint, ScenarioConfig } from '../../state/types'
 
@@ -87,26 +103,45 @@ const DECISION_POINTS: DecisionPoint[] = [
   },
   {
     id: 'analgosedation-weaning',
+    // Not a forced sequence between the two drugs (see the module doc comment) — kept
+    // as 'weanSequence' since it's still the closest of the 5 fixed trapType categories
+    // and the field is purely informational (drives no branching logic). The actual
+    // teaching point here is independent per-drug wean judgment, not an order.
     trapType: 'weanSequence',
     trigger: { kind: 'weanEligible' },
     situation: 'Pain score and RASS are both at goal, and both agents are infusing. What next?',
-    policyHint: 'Spontaneous-awakening-trial practice: sedation weans first, analgesia last — dexmedetomidine before fentanyl here.',
+    policyHint:
+      "Pain and sedation are independent targets here — once EACH agent's own goal is met, it can be weaned on its own timeline. There's no fixed cross-drug wean order between fentanyl and dexmedetomidine the way there is among pressors sharing one MAP target.",
     options: [
       {
         id: 'wean-dexmedetomidine',
         label: 'Wean dexmedetomidine one step',
-        caption: 'Sedation weans first, per spontaneous-awakening-trial practice.',
+        caption: 'RASS is at goal — sedation can be reduced on its own merits.',
         group: 'covered',
         effect: { kind: 'submitDoseRelative', orderId: 'order-dexmedetomidine-as', deltaSteps: -1 },
-        feedback: { text: 'Correct — sedation weans first, before analgesia, matching spontaneous-awakening-trial practice.' },
+        feedback: {
+          text: "Correct — dexmedetomidine's own target (RASS) is met, so it can be weaned now, independent of fentanyl's status.",
+        },
       },
       {
         id: 'wean-fentanyl',
         label: 'Wean fentanyl one step',
-        caption: 'Fentanyl was the first agent started.',
-        group: 'gap',
+        caption: 'Pain score is at goal — analgesia can be reduced on its own merits.',
+        group: 'covered',
         effect: { kind: 'submitDoseRelative', orderId: 'order-fentanyl-as', deltaSteps: -1 },
-        feedback: { text: 'Fentanyl has a lower wean priority than dexmedetomidine here — clear dexmedetomidine first before weaning analgesia.' },
+        feedback: {
+          text: "Also correct — fentanyl's own target (pain score) is met, so it can be weaned now too. Pain and sedation are independent here; either agent may come down first, based on its own status, not a fixed priority between the two.",
+        },
+      },
+      {
+        id: 'increase-dexmedetomidine',
+        label: 'Increase dexmedetomidine further since sedation is working well',
+        caption: 'The patient seems comfortable — push a little deeper.',
+        group: 'gap',
+        effect: { kind: 'submitDoseRelative', orderId: 'order-dexmedetomidine-as', deltaSteps: 1 },
+        feedback: {
+          text: 'RASS is already within its goal range — further up-titration is not indicated once a target is met, regardless of how well the patient looks. Reassess and consider weaning instead.',
+        },
       },
     ],
   },
@@ -167,7 +202,9 @@ export const ANALGOSEDATION: ScenarioConfig = {
       increment: 10,
       interval: { minMinutes: 10 },
       target: { metric: 'painScore', comparator: '<=', value: 4, unit: 'score' },
-      weanOrder: 2,
+      // Same weanOrder as dexmedetomidine below (both 1, not a 1/2 sequence) —
+      // independently weanable, see the module doc comment.
+      weanOrder: 1,
     },
     {
       id: 'order-dexmedetomidine-as',
@@ -184,9 +221,13 @@ export const ANALGOSEDATION: ScenarioConfig = {
       // Kept as the exact fraction (matching this codebase's existing convention of
       // exact fractions, e.g. vasopressin's activationThreshold: 1 / 3 in the flagship).
       activationThreshold: 25 / 150,
-      // Spontaneous-awakening-trial practice: sedation (the later-added agent) weans
-      // first; analgesia (fentanyl) weans last — same inverse-of-sequence shape as the
-      // flagship's pressor pair, applied here to sedation instead.
+      // Paired with fentanyl's OWN painScore target being MET (not unmet) — see the
+      // module doc comment. Omitting this would (and, before Phase 19h, did) require
+      // pain score to stay above goal for dexmedetomidine to ever unlock — backwards
+      // from real practice.
+      activationRequiresPriorTargetMet: true,
+      // Same weanOrder as fentanyl above (both 1) — independently weanable, see the
+      // module doc comment; no fixed sedation-before-analgesia priority is asserted.
       weanOrder: 1,
       // Phase 19g: 50% of dexmedetomidine's own ordered max (0.7 * 0.5 = 0.35) — crosses
       // partway through the titration range, distinct from the ordered ceiling itself.
@@ -217,14 +258,23 @@ export const ANALGOSEDATION: ScenarioConfig = {
     // effect" value, matching the "omit for no effect" convention used for this
     // interface's genuinely optional per-vital fields.
     fentanyl: { maxMapContribution: 0, maxPainScoreContribution: -5 },
-    dexmedetomidine: { maxMapContribution: 0, maxRassContribution: -4, maxHrContribution: -8 },
+    // maxRassContribution: -2, not -4. projectDoseResponse's sqrt curve (Phase 8b) is
+    // front-loaded, so a steeper ceiling let dexmedetomidine's own startDose (0.2, ~29%
+    // of its 0.7 max — sqrt(0.2/0.7) ≈ 0.53) land RASS almost immediately inside the -2..0
+    // target, undercutting the titration teaching point. At -2, startDose projects RASS to
+    // 2 + sqrt(0.2/0.7)*-2 ≈ +0.93 (rounds to +1, clearly outside target), and it takes two
+    // real titration steps (0.2 -> 0.3 -> 0.4) before RASS rounds into the -2..0 range —
+    // and stays there out to dexmedetomidine's own ordered maximum (2 + -2 = 0, right at
+    // the target's edge) — giving RASS a genuine climb to demonstrate instead of landing
+    // in range at the very first dose.
+    dexmedetomidine: { maxMapContribution: 0, maxRassContribution: -2, maxHrContribution: -8 },
   },
   // Not a shock/deterioration vignette — pain and agitation don't spontaneously worsen
   // on a fixed curve the way untreated septic shock does; whatever happens here is
   // purely a function of the two orders actually titrated (or not).
   deterioration: { ratePerMinute: 0, maxDrop: 0 },
   objective:
-    'Titrate fentanyl to pain score and dexmedetomidine to RASS as two independent targets, adding sedation only once analgesia is established — and wean sedation before analgesia.',
+    'Titrate fentanyl to pain score and dexmedetomidine to RASS as two independent targets, adding sedation only once analgesia is established — and wean each agent on its own timeline once its own target is met.',
   enableBlockOfCharting: false,
   decisionPoints: DECISION_POINTS,
 }

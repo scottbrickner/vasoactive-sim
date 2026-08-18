@@ -47,23 +47,46 @@ export function formatTargetGapText(target: TitrationTarget): string {
   }
 }
 
+/**
+ * "MAP at or above 65 mmHg" / "RASS within -2-0 score" — the "target IS met" counterpart
+ * to formatTargetGapText (Phase 19h), used when an activation condition is phrased
+ * against the prior agent's own target being ACHIEVED rather than still unmet (see
+ * activation.ts's deriveActivationText / Order.activationRequiresPriorTargetMet) — e.g.
+ * sedation activating once analgesia's own goal is established, not still short of it.
+ */
+export function formatTargetMetText(target: TitrationTarget): string {
+  switch (target.comparator) {
+    case '>=':
+      return `${target.metric} at or above ${target.value} ${target.unit}`
+    case '<=':
+      return `${target.metric} at or below ${target.value} ${target.unit}`
+    case 'between':
+      return `${target.metric} within ${target.value}-${target.valueHigh} ${target.unit}`
+  }
+}
+
 /** e.g. "Start at 0.5 mcg/min IV, titrate 0.5 mcg/min q3-5 min up to 30 mcg/min. Target MAP >= 65 mmHg." */
 export function deriveFullOrderText(order: Order, drug: DrugDefinition): string {
   return `Start at ${order.startDose} ${drug.unit} IV, titrate ${order.increment} ${drug.unit} ${formatInterval(order.interval)} up to ${order.maxDose} ${drug.unit}. Target ${formatTargetClause(order.target)}.`
 }
 
 /**
- * Fixed CP 4-156 wean-priority policy sentence, shown whenever any order in
- * `allOrders` carries a `weanOrder` — the RULE itself (most-recently-added agent weans
- * first) is fixed institutional policy, not scenario-specific data; only whether it
- * applies to this session is derived. `order` isn't itself consulted (the sentence is
- * the same for every order in a wean-ordered set) but stays a parameter for symmetry
- * with `deriveFullOrderText`/`deriveActivationText`, and so a future per-order variant
- * (e.g. "you wean after X") can be added without changing every call site's shape.
+ * Fixed CP 4-156 wean-priority policy sentence, shown whenever `allOrders` carries a
+ * REAL wean ordering — at least two distinct `weanOrder` values, meaning some agent
+ * genuinely must clear before another (see priorAgentsWeaned in state/store.ts). The
+ * RULE itself (most-recently-added agent weans first) is fixed institutional policy,
+ * not scenario-specific data; only whether it applies is derived. Deliberately does
+ * NOT fire when every wean-tagged order shares the SAME `weanOrder` value (Phase 19h) —
+ * that shape marks a set of agents as independently weanable, each on its own target's
+ * merits, with no cross-drug priority to assert (e.g. fentanyl/dexmedetomidine's
+ * genuinely independent pain-score/RASS targets — asserting a fixed priority between
+ * them would misstate real practice, per direct clinical correction). `order` isn't
+ * itself consulted (the sentence is the same for every order in a real wean-ordered
+ * set) but stays a parameter for symmetry with `deriveFullOrderText`/`deriveActivationText`.
  */
 export function deriveWeanPriorityText(_order: Order, allOrders: Order[]): string | undefined {
-  const anyWeanOrdered = allOrders.some((o) => o.weanOrder != null)
-  if (!anyWeanOrdered) return undefined
+  const distinctWeanOrders = new Set(allOrders.map((o) => o.weanOrder).filter((w): w is number => w != null))
+  if (distinctWeanOrders.size < 2) return undefined
   return 'Wean priority: most recently added agent comes off first.'
 }
 
