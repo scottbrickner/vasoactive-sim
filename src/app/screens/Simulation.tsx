@@ -147,6 +147,19 @@ export function Simulation() {
     pendingOverride !== null ||
     pendingDecisionPoint !== null ||
     pendingPacingOffer !== null
+  /**
+   * DoseEntryControl's own narrower lock — DecisionCard is explicitly an in-flow
+   * contextual overlay, not a blocking modal (see this file's own top-of-file doc
+   * comment and DecisionCard.tsx's own: "the real dose-entry control stays mounted and
+   * usable regardless of whether this card is showing"). `locked` above is correct for
+   * every genuine alertdialog modal (VerificationPanel/OverrideConfirmPanel/
+   * IndependentCheckPanel/PacingOfferPanel) but was also disabling dose entry the moment
+   * a decision card opened — the opposite of that stated design. This is the one place
+   * `pendingDecisionPoint` doesn't lock; every other locked control (advance-time,
+   * Block of Charting, provider notification, Begin Bag, chart-now, retrospective
+   * charting) intentionally still waits on a decision the same as any other pending panel.
+   */
+  const doseEntryLocked = pendingAction !== null || pendingIndependentCheck !== null || pendingOverride !== null || pendingPacingOffer !== null
 
   function handleAdvanceClock(byMinutes: number) {
     advanceClock(byMinutes)
@@ -325,7 +338,7 @@ export function Simulation() {
             onPause={pauseInfusion}
             onRestart={restartInfusion}
             onDiscontinue={discontinueInfusion}
-            disabled={locked}
+            disabled={doseEntryLocked}
           />
         ))}
       </div>
