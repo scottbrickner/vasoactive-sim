@@ -571,6 +571,15 @@ interface SimStore {
 
   completeBeginBag: (infusionId: string) => void
   /**
+   * Materializes a sequence>1 order's infusion the moment it becomes activation-eligible,
+   * completing Begin Bag in the same action — closes the gap where a sequence>1 drug
+   * (activated mid-sim) had no infusion object at all until first dose-submit, unlike a
+   * sequence-1 drug (pre-seeded `hanging` by the scenario at minute 0). See the doc
+   * comment on the implementation below for why "create" and "complete Begin Bag" are
+   * one action here, not two.
+   */
+  beginBagForOrder: (orderId: string) => void
+  /**
    * Handles both initiation (no/hanging infusion) and titration (infusing), keyed by
    * order. Returns the LogEntry it created (null if it bailed early or deferred to
    * pendingOverride) — chooseDecisionOption uses the return value to derive a real
@@ -786,6 +795,65 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
     set((s) => ({
       infusions: s.infusions.map((i) => (i.id === infusionId ? { ...i, beginBagCompleted: true } : i)),
+      log: [...s.log, actionEntry, marEntry],
+      adherenceFlags: { ...s.adherenceFlags, [actionEntry.id]: true },
+      feedback: {
+        tone: 'success',
+        title: 'Begin Bag complete',
+        message: `${drug.name} is hung and ready — BCMA/I-TRACE verification happens when you program the starting dose.`,
+      },
+    }))
+  },
+
+  /**
+   * Materializes a sequence>1 order's infusion the moment it becomes activation-eligible,
+   * completing Begin Bag in the same action — for a newly-activating drug, hanging the bag
+   * and charting it in MAR really is one real-world moment (unlike sequence-1's two-step UI
+   * flow, which is only two clicks because the scenario data happens to pre-seed the hanging
+   * state before the sim even starts, not because bag-hanging is inherently two steps). A
+   * no-op if this order already has an infusion (shouldn't happen in practice — DoseEntryControl
+   * only ever offers this action when `!infusion`).
+   */
+  beginBagForOrder: (orderId) => {
+    const state = get()
+    const order = state.orders.find((o) => o.id === orderId)
+    if (!order || state.infusions.some((i) => i.orderId === orderId)) return
+    const drug = getDrug(order.drugId)
+
+    const infusion: Infusion = {
+      id: nextId('infusion'),
+      orderId,
+      drugId: order.drugId,
+      status: 'hanging',
+      rate: 0,
+      initialRate: null,
+      channel: nextChannelLetter(state.infusions),
+      beginBagCompleted: true,
+      lastActionMinute: null,
+      stoppedAtMinute: null,
+      rateBeforePause: null,
+    }
+    const actionEntry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'action',
+      summary: `Begin Bag: ${drug.name} bag hung, ready to program.`,
+      orderId,
+      drugId: order.drugId,
+      outcome: 'applied',
+    }
+    const marEntry: LogEntry = {
+      id: nextId('log'),
+      minute: state.clockMinutes,
+      type: 'documentation',
+      location: correctLocationFor('beginBag'),
+      summary: `Begin Bag charted in MAR: ${drug.name}.`,
+      orderId,
+      drugId: order.drugId,
+    }
+
+    set((s) => ({
+      infusions: [...s.infusions, infusion],
       log: [...s.log, actionEntry, marEntry],
       adherenceFlags: { ...s.adherenceFlags, [actionEntry.id]: true },
       feedback: {
@@ -1160,6 +1228,10 @@ export const useSimStore = create<SimStore>((set, get) => ({
     set((s) => ({
       pendingDecisionPoint: { decisionPointId },
       decisionPointsShown: { ...s.decisionPointsShown, [decisionPointId]: true },
+      // Clear any stale toast from a prior action — the decision card is now the
+      // primary attention surface, and a lingering toast (e.g. naming an old dose)
+      // would contradict what the card and pump now show.
+      feedback: null,
     })),
 
   chooseDecisionOption: (optionId) => {

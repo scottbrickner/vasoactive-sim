@@ -113,6 +113,7 @@ export function Simulation() {
   const feedback = useSimStore((s) => s.feedback)
   const dismissFeedback = useSimStore((s) => s.dismissFeedback)
   const completeBeginBag = useSimStore((s) => s.completeBeginBag)
+  const beginBagForOrder = useSimStore((s) => s.beginBagForOrder)
   const submitDose = useSimStore((s) => s.submitDose)
   const notifyProvider = useSimStore((s) => s.notifyProvider)
   const chartVitals = useSimStore((s) => s.chartVitals)
@@ -320,6 +321,7 @@ export function Simulation() {
             info={info}
             onRequestProgram={(orderId, dose) => setPendingAction({ kind: 'initiate', orderId, dose })}
             onTitrate={(orderId, dose) => submitDose(orderId, dose)}
+            onBeginBag={(orderId) => beginBagForOrder(orderId)}
             onPause={pauseInfusion}
             onRestart={restartInfusion}
             onDiscontinue={discontinueInfusion}
@@ -332,6 +334,8 @@ export function Simulation() {
         <DecisionCard
           decisionPoint={decisionPoint}
           mode={mode}
+          orders={orders}
+          infusions={infusions}
           onChoose={chooseDecisionOption}
           onDecideLater={dismissDecisionPoint}
         />

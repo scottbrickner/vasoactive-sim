@@ -285,6 +285,14 @@ describe('store — early-notification threshold', () => {
     expect(state.pendingDecisionPoint).toEqual({ decisionPointId: autoEarlyNotificationDecisionPointId(NOREPI_ORDER_ID) })
   })
 
+  it('presentDecisionPoint clears a stale toast left over from a prior action so it cannot linger under the decision card', () => {
+    useSimStore.setState({ feedback: { tone: 'warning', title: 'Off-order — not applied', message: 'stale from a prior attempt' } })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9) // crosses the threshold, opens a decision point
+    const state = useSimStore.getState()
+    expect(state.pendingDecisionPoint).toEqual({ decisionPointId: autoEarlyNotificationDecisionPointId(NOREPI_ORDER_ID) })
+    expect(state.feedback).toBeNull()
+  })
+
   it('does not refire on a later titration once already past the threshold', () => {
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9)
     useSimStore.setState({ clockMinutes: 6 })
@@ -542,7 +550,13 @@ describe('store — multi-agent sequence (vasopressin)', () => {
     const state = useSimStore.getState()
     const vaso = state.infusions.find((i) => i.drugId === 'vasopressin')
     expect(vaso).toMatchObject({ status: 'infusing', rate: 0.02, beginBagCompleted: true, channel: 'B' })
-    expect(state.feedback).toMatchObject({ tone: 'success', title: 'Infusion started' })
+    // Vasopressin's own 30-min interval advances the clock far enough that MAP crosses
+    // the 65 target on this same tick, opening the wean-eligible decision card
+    // (advanceClock's weanEligible check, below) — which now correctly wins over and
+    // clears the routine "Infusion started" toast (Fix 3) rather than leaving it
+    // lingering, stale, underneath the decision card.
+    expect(state.pendingDecisionPoint).toEqual({ decisionPointId: 'neutropenic-septic-shock-weaning' })
+    expect(state.feedback).toBeNull()
   })
 
   it('activates agent 2 at 1/3 of norepi max (10 mcg/min), not only at its full max', () => {
@@ -567,6 +581,80 @@ describe('store — multi-agent sequence (vasopressin)', () => {
 
     useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.02)
     expect(useSimStore.getState().pendingOverride?.violations.sequenceNotActivated).toBe(true)
+  })
+})
+
+describe('store — beginBagForOrder (sequence>1 Begin Bag gap)', () => {
+  function activateVasopressin() {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 0.5)
+    useSimStore.setState((s) => ({
+      infusions: s.infusions.map((i) => (i.drugId === 'norepinephrine' ? { ...i, rate: 10, lastActionMinute: 30 } : i)),
+    }))
+  }
+
+  it('creates a hanging, beginBagCompleted infusion for an activation-eligible sequence>1 order, logging action+MAR entries and adherenceFlags', () => {
+    activateVasopressin()
+    expect(useSimStore.getState().infusions.some((i) => i.drugId === 'vasopressin')).toBe(false)
+
+    useSimStore.getState().beginBagForOrder(VASOPRESSIN_ORDER_ID)
+    const state = useSimStore.getState()
+    const vaso = state.infusions.find((i) => i.drugId === 'vasopressin')
+    expect(vaso).toMatchObject({
+      status: 'hanging',
+      rate: 0,
+      initialRate: null,
+      beginBagCompleted: true,
+      channel: 'B',
+    })
+    expect(state.feedback).toMatchObject({ tone: 'success', title: 'Begin Bag complete' })
+
+    const actionEntry = state.log.find((e) => e.type === 'action' && e.orderId === VASOPRESSIN_ORDER_ID)
+    expect(actionEntry).toBeDefined()
+    expect(actionEntry!.summary).toMatch(/Begin Bag: Vasopressin/)
+    expect(state.adherenceFlags[actionEntry!.id]).toBe(true)
+
+    const marEntry = state.log.find(
+      (e) => e.type === 'documentation' && e.location === 'MAR' && e.orderId === VASOPRESSIN_ORDER_ID,
+    )
+    expect(marEntry).toBeDefined()
+    expect(marEntry!.summary).toMatch(/Begin Bag charted in MAR: Vasopressin/)
+  })
+
+  it('no-ops if an infusion already exists for that order (does not create a duplicate)', () => {
+    activateVasopressin()
+    useSimStore.getState().beginBagForOrder(VASOPRESSIN_ORDER_ID)
+    const countAfterFirst = useSimStore.getState().infusions.filter((i) => i.drugId === 'vasopressin').length
+    expect(countAfterFirst).toBe(1)
+
+    useSimStore.getState().beginBagForOrder(VASOPRESSIN_ORDER_ID)
+    const state = useSimStore.getState()
+    expect(state.infusions.filter((i) => i.drugId === 'vasopressin').length).toBe(1)
+  })
+
+  it('composes end-to-end with a normal submitDose initiate call afterward', () => {
+    activateVasopressin()
+    useSimStore.getState().beginBagForOrder(VASOPRESSIN_ORDER_ID)
+    const order = useSimStore.getState().orders.find((o) => o.id === VASOPRESSIN_ORDER_ID)!
+
+    useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, order.startDose)
+    const state = useSimStore.getState()
+    const vaso = state.infusions.find((i) => i.drugId === 'vasopressin')
+    expect(vaso).toMatchObject({ status: 'infusing', rate: order.startDose, initialRate: order.startDose })
+    expect(state.feedback).not.toMatchObject({ tone: 'danger' })
+  })
+
+  // Regression guard (Fix constraint: sequence-1's pre-seeded Begin Bag flow is
+  // completely unaffected by this fix) — re-confirms the existing sequence-1
+  // completeBeginBag test above still passes unmodified.
+  it('leaves sequence-1 Begin Bag (completeBeginBag) behavior unaffected', () => {
+    useSimStore.getState().completeBeginBag(norepiInfusion().id)
+    const state = useSimStore.getState()
+    expect(norepiInfusion().beginBagCompleted).toBe(true)
+    expect(state.feedback).toMatchObject({ tone: 'success', title: 'Begin Bag complete' })
+    const marEntry = state.log.find((e) => e.type === 'documentation' && e.location === 'MAR')
+    expect(marEntry).toBeDefined()
+    expect(marEntry!.summary).toMatch(/Begin Bag charted in MAR/)
   })
 })
 

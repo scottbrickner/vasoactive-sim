@@ -52,19 +52,67 @@ describe('scoreSession — a clean, fully-compliant run', () => {
   })
 })
 
-describe('scoreSession — off-order titration', () => {
-  it('flags adherence and interval/increment as partial when a titration is rejected', () => {
+describe('scoreSession — cancelled (off-order) dose entries are excluded from scoring', () => {
+  it('excludes a cancelled titration from the adherence and interval/increment denominators', () => {
     const s = useSimStore.getState()
     s.completeBeginBag(norepiInfusionId())
     s.submitDose(NOREPI_ORDER_ID, 0.5) // initiate ok, auto-advances so interval is already satisfied
     s.submitDose(NOREPI_ORDER_ID, 2) // titrate — wrong increment (delta 1.5, ordered 0.5), deferred
-    s.cancelDoseOverride() // training mode — logs it as off-order
-    expect(categoryStatus('adherence')).toBe('partial')
-    // Only one titration was attempted and it violated the interval, so 0-of-1 is
-    // correctly "missed" here, not "partial" — partial would need a mix of both.
-    expect(categoryStatus('intervalIncrement')).toBe('missed')
+    s.cancelDoseOverride() // training mode — cancelled, never applied; excluded from scoring
+    // Only the clean initiate remains in the denominator — the cancelled titrate never
+    // reached the patient, so it's excluded rather than counted as a miss.
+    expect(categoryStatus('adherence')).toBe('met')
     const card = score()
-    expect(card.opportunities.some((o) => /interval & increment/i.test(o) || /interval/i.test(o))).toBe(true)
+    const adherence = card.categories.find((c) => c.key === 'adherence')!
+    expect(adherence.detail).toMatch(/1 of 1/)
+    // No titrations remain once the cancelled one is excluded — "no titrations attempted",
+    // not "0 of 1 compliant".
+    expect(categoryStatus('intervalIncrement')).toBe('n/a')
+    expect(card.opportunities.some((o) => /interval & increment/i.test(o))).toBe(false)
+  })
+
+  it('routes a cancelled attempt to coachingNotes instead — never duplicated into opportunities', () => {
+    const s = useSimStore.getState()
+    s.completeBeginBag(norepiInfusionId())
+    s.submitDose(NOREPI_ORDER_ID, 0.5)
+    s.submitDose(NOREPI_ORDER_ID, 2) // wrong increment, deferred
+    s.cancelDoseOverride()
+    const card = score()
+    expect(card.coachingNotes).toHaveLength(1)
+    expect(card.coachingNotes[0]).toMatch(/Caught before it reached the patient/)
+    expect(card.coachingNotes[0]).toMatch(/Norepinephrine/)
+    expect(card.coachingNotes[0]).toMatch(/no harm done/)
+    // The coaching note's own text must never also surface in opportunities.
+    expect(card.opportunities).not.toContain(card.coachingNotes[0])
+  })
+
+  it('reports an empty coachingNotes array when nothing was cancelled', () => {
+    const s = useSimStore.getState()
+    s.completeBeginBag(norepiInfusionId())
+    s.submitDose(NOREPI_ORDER_ID, 0.5)
+    expect(score().coachingNotes).toEqual([])
+  })
+
+  it('scores strictly higher than the same off-order dose applied via override instead of cancelled', () => {
+    const s = useSimStore.getState()
+    s.completeBeginBag(norepiInfusionId())
+    s.submitDose(NOREPI_ORDER_ID, 0.5)
+    s.submitDose(NOREPI_ORDER_ID, 2) // wrong increment, deferred
+    s.cancelDoseOverride() // caught and corrected — should not count against the score
+    const cancelledPercent = score().overallPercent
+
+    useSimStore.getState().startScenario(DEFAULT_SCENARIO, 'training')
+    useSimStore.setState({ phase: 'sim' })
+    const s2 = useSimStore.getState()
+    s2.completeBeginBag(norepiInfusionId())
+    s2.submitDose(NOREPI_ORDER_ID, 0.5)
+    s2.submitDose(NOREPI_ORDER_ID, 2) // wrong increment, deferred
+    s2.confirmDoseOverride() // same off-order dose, but actually applied to the patient
+    const appliedOverridePercent = score().overallPercent
+
+    expect(cancelledPercent).not.toBeNull()
+    expect(appliedOverridePercent).not.toBeNull()
+    expect(cancelledPercent!).toBeGreaterThan(appliedOverridePercent!)
   })
 })
 
@@ -146,10 +194,16 @@ describe('scoreSession — early-notification threshold', () => {
 })
 
 describe('scoreSession — sequencing violation', () => {
-  it('is partial when agent 2 is attempted before activation, but never "missed" (hard-blocked)', () => {
+  it('is partial when agent 2 is attempted and applied via override before activation, but never "missed" (hard-blocked)', () => {
+    useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.02)
+    useSimStore.getState().confirmDoseOverride()
+    expect(categoryStatus('sequencing')).toBe('partial')
+  })
+
+  it('excludes a cancelled sequencing attempt from the denominator — same off-order exclusion as category 1/2', () => {
     useSimStore.getState().submitDose(VASOPRESSIN_ORDER_ID, 0.02)
     useSimStore.getState().cancelDoseOverride()
-    expect(categoryStatus('sequencing')).toBe('partial')
+    expect(categoryStatus('sequencing')).toBe('met')
   })
 })
 
@@ -296,12 +350,20 @@ describe('scoreSession — weaning sequence', () => {
     expect(categoryStatus('weaning')).toBe('n/a')
   })
 
-  it('is partial when a down-titration is attempted before the lower-weanOrder agent is cleared', () => {
+  it('is partial when a down-titration is applied via override before the lower-weanOrder agent is cleared', () => {
+    seedTwoAgentWeanOrder(0.03)
+    useSimStore.setState({ clockMinutes: 30 })
+    useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9.5) // down-titration, deferred (training mode)
+    useSimStore.getState().confirmDoseOverride()
+    expect(categoryStatus('weaning')).toBe('partial')
+  })
+
+  it('excludes a cancelled down-titration attempt from the weaning denominator — same off-order exclusion as category 1/2', () => {
     seedTwoAgentWeanOrder(0.03)
     useSimStore.setState({ clockMinutes: 30 })
     useSimStore.getState().submitDose(NOREPI_ORDER_ID, 9.5) // down-titration, deferred (training mode)
     useSimStore.getState().cancelDoseOverride()
-    expect(categoryStatus('weaning')).toBe('partial')
+    expect(categoryStatus('weaning')).toBe('met')
   })
 
   it('is partial when discontinuation happens before the lower-weanOrder agent is cleared', () => {
@@ -362,6 +424,7 @@ describe('scoreSession — no activity at all', () => {
     expect(card.overallPercent).toBeNull()
     expect(card.strengths).toEqual([])
     expect(card.opportunities).toEqual([])
+    expect(card.coachingNotes).toEqual([])
   })
 })
 
@@ -371,6 +434,7 @@ function fixtureCard(overrides: Partial<Scorecard> = {}): Scorecard {
     overallPercent: 100,
     strengths: [],
     opportunities: [],
+    coachingNotes: [],
     ...overrides,
   }
 }

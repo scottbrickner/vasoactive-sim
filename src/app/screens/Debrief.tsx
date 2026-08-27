@@ -128,6 +128,21 @@ export function Debrief() {
         </div>
       </Panel>
 
+      {card.coachingNotes.length > 0 && (
+        <Panel title="Coaching notes" subtitle="Self-corrected in the moment — these don't affect your score">
+          <ul className="flex flex-col gap-1">
+            {card.coachingNotes.map((note) => (
+              <li key={note} className="flex items-start gap-2 text-sm text-ink">
+                <span aria-hidden="true" className="mt-0.5 text-info">
+                  ℹ
+                </span>
+                {note}
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      )}
+
       {decisionEntries.length > 0 && (
         <Panel
           title="Decision review"

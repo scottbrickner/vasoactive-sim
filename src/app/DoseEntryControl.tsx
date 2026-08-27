@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { Button, InlineConfirm } from '../design/primitives'
 import type { PumpChannelInfo } from '../devices/AlarisPump/AlarisPump'
+import type { LogEntry } from '../state/types'
 
 export interface DoseEntryControlProps {
   info: PumpChannelInfo
   onRequestProgram: (orderId: string, dose: number) => void
-  onTitrate: (orderId: string, dose: number) => void
+  onTitrate: (orderId: string, dose: number) => LogEntry | null
+  onBeginBag: (orderId: string) => void
   onPause: (infusionId: string) => void
   onRestart: (infusionId: string) => void
   onDiscontinue: (infusionId: string) => void
@@ -23,7 +25,16 @@ export interface DoseEntryControlProps {
  * AlarisChannelModule/AlarisPump components are untouched and still importable for any
  * future screen that wants the faithful-replica register back.
  */
-export function DoseEntryControl({ info, onRequestProgram, onTitrate, onPause, onRestart, onDiscontinue, disabled }: DoseEntryControlProps) {
+export function DoseEntryControl({
+  info,
+  onRequestProgram,
+  onTitrate,
+  onBeginBag,
+  onPause,
+  onRestart,
+  onDiscontinue,
+  disabled,
+}: DoseEntryControlProps) {
   const { order, drug, infusion, isActivated } = info
   const [doseInput, setDoseInput] = useState('')
   const [confirmTick, setConfirmTick] = useState<number | null>(null)
@@ -38,6 +49,37 @@ export function DoseEntryControl({ info, onRequestProgram, onTitrate, onPause, o
       <div className="rounded-md border border-border bg-bg p-3">
         <p className="text-sm font-semibold text-ink">{drug.name} — not yet available</p>
         <p className="mt-1 text-sm text-muted">{order.activatesWhen}</p>
+      </div>
+    )
+  }
+
+  // Sequence>1 order just became activation-eligible but has no infusion yet — unlike a
+  // sequence-1 order (pre-seeded `hanging` by the scenario at minute 0), this order has
+  // never had a bag hung. Give it the same visible Begin Bag step before Program appears,
+  // rather than letting Program show up with zero bag-hanging moment (see
+  // beginBagForOrder in state/store.ts).
+  if (!infusion && isActivated) {
+    return (
+      <div className="rounded-md border border-border bg-bg p-3">
+        <div className="flex items-baseline justify-between">
+          <span className="text-sm font-semibold text-ink">{drug.name}</span>
+        </div>
+        <p className="mt-1 text-xs text-muted">
+          Ordered range {order.startDose}–{order.maxDose} {drug.unit}
+        </p>
+        <div className="mt-3">
+          <Button
+            size="sm"
+            disabled={disabled}
+            onClick={() => {
+              onBeginBag(order.id)
+              fireConfirm('Begin Bag complete')
+            }}
+          >
+            Begin Bag
+          </Button>
+        </div>
+        <InlineConfirm trigger={confirmTick} message={confirmMessage} />
       </div>
     )
   }
@@ -97,8 +139,8 @@ export function DoseEntryControl({ info, onRequestProgram, onTitrate, onPause, o
             disabled={!canProgram || !isValidNumber}
             onClick={() => {
               if (infusion?.status === 'infusing') {
-                onTitrate(order.id, parsed)
-                fireConfirm(`Titrated to ${parsed}`)
+                const entry = onTitrate(order.id, parsed)
+                if (entry) fireConfirm(`Titrated to ${parsed}`)
               } else {
                 onRequestProgram(order.id, parsed)
               }
@@ -118,6 +160,9 @@ export function DoseEntryControl({ info, onRequestProgram, onTitrate, onPause, o
             </Button>
           )}
           <InlineConfirm trigger={confirmTick} message={confirmMessage} />
+          {infusion && !infusion.beginBagCompleted && !paused && (
+            <p className="w-full text-xs text-cardinal-dark">Complete Begin Bag in the MAR below before programming the starting dose.</p>
+          )}
         </div>
       )}
     </div>

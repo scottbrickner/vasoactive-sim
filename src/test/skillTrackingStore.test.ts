@@ -8,6 +8,7 @@ const PASSING_CARD: Scorecard = {
   overallPercent: SKILL_SIGNOFF_CRITERIA.minOverallPercent,
   strengths: [],
   opportunities: [],
+  coachingNotes: [],
 }
 
 // Vitest shares one module instance per test file, so this store's state (and

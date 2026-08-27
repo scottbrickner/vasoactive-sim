@@ -15,7 +15,14 @@ export interface CernerChartingStatusProps {
 function cadenceLabel(check: CadenceCheck): string {
   switch (check.point) {
     case 'initiation':
-      return 'Initiation'
+      // Pre-seeded infusions (e.g. weaningSupport's 3 already-infusing pressors) were
+      // never "initiated" by this learner — a handoff nurse charts a shift assessment
+      // on takeover, not an initiation. Mirrors engine/documentation.ts's cadenceLabel;
+      // kept as a separate hand-copied function (not reused) because that one lowercases
+      // this label ("initiation charting") while this component's are capitalized
+      // standalone labels ("Pre-titration #1") — reconciling casing isn't a safe
+      // one-line change, so both copies stay in sync by hand.
+      return check.preSeeded ? 'Shift assessment' : 'Initiation'
     case 'plus30Start':
       return '+30 min after start'
     case 'preTitration':

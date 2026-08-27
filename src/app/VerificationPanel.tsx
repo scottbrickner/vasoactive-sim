@@ -1,3 +1,4 @@
+import { useId, useState } from 'react'
 import { Button, Panel } from '../design/primitives'
 
 export interface VerificationPanelProps {
@@ -21,6 +22,24 @@ export interface VerificationPanelProps {
  * cadence elsewhere in this sim.
  */
 export function VerificationPanel({ title, checklist, onConfirm, onCancel }: VerificationPanelProps) {
+  // Indexed by position, not item text — two checklist items could share the same
+  // wording in principle, and position is stable for the life of this mount. Fresh
+  // every mount (Simulation.tsx renders this panel as `{pendingAction && <VerificationPanel .../>}`,
+  // so a new verification always gets a newly-mounted panel, never a re-used one with
+  // stale checked state carried over).
+  const [checked, setChecked] = useState<Set<number>>(new Set())
+  const idPrefix = useId()
+  const allChecked = checked.size === checklist.length
+
+  function toggle(index: number) {
+    setChecked((prev) => {
+      const next = new Set(prev)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
+
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-ink/40 p-4">
       <Panel
@@ -45,17 +64,26 @@ export function VerificationPanel({ title, checklist, onConfirm, onCancel }: Ver
           (I-TRACE) before proceeding.
         </p>
         <ul className="mt-3 flex flex-col gap-2">
-          {checklist.map((item) => (
-            <li key={item} className="flex items-start gap-2 text-sm text-ink">
-              <span aria-hidden="true" className="mt-0.5 text-cardinal">
-                ✓
-              </span>
-              {item}
-            </li>
-          ))}
+          {checklist.map((item, index) => {
+            const itemId = `${idPrefix}-item-${index}`
+            return (
+              <li key={item} className="flex items-start gap-2 text-sm text-ink">
+                <input
+                  id={itemId}
+                  type="checkbox"
+                  checked={checked.has(index)}
+                  onChange={() => toggle(index)}
+                  className="mt-0.5 size-4 shrink-0 accent-cardinal"
+                />
+                <label htmlFor={itemId}>{item}</label>
+              </li>
+            )
+          })}
         </ul>
         <div className="mt-4 flex gap-3">
-          <Button onClick={onConfirm}>Confirm verification</Button>
+          <Button disabled={!allChecked} onClick={onConfirm}>
+            Confirm verification
+          </Button>
           <Button variant="ghost" onClick={onCancel}>
             Cancel
           </Button>

@@ -42,11 +42,15 @@ export function StatusStrip({ clockMinutes, vitals, orders, targetLabels }: Stat
       ))}
       {targetLabels && targetLabels.length > 0 && (
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          {targetLabels.map((label, i) => (
-            // Keyed by position, not label text — two different orders (e.g. a
-            // multi-agent scenario's sequence-1/2 agents) can share the identical
-            // formatted clause (both targeting the same "MAP >= 65 mmHg"), which would
-            // otherwise collide as a React key.
+          {/* Deduped, preserving first-occurrence order — a multi-agent scenario where
+              several orders share an identical formatted target clause (e.g. three
+              pressors all targeting "MAP >= 65 mmHg") should render that chip once, not
+              once per order. */}
+          {[...new Set(targetLabels)].map((label, i) => (
+            // Keyed by position, not label text — even after dedup, positions stay
+            // stable within the deduped array, so a positional key remains safe (and
+            // labels could in principle repeat non-adjacently after future formatting
+            // changes, so this avoids relying on label text as a key at all).
             <span
               key={i}
               className="rounded-full bg-gold-soft px-3 py-1 text-xs font-semibold text-cardinal-dark"

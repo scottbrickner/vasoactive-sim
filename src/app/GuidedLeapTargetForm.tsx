@@ -67,6 +67,10 @@ export function GuidedLeapTargetForm({ order, drug, currentDose, defaultTarget, 
           <p className="mt-1 text-muted">
             Auto-charted along the way — the timeline will show each step's dose and vitals if you look back.
           </p>
+          <p className="mt-1 text-muted">
+            This also creates {plan.doses.length * 2} documentation checkpoints — a pre- and post-titration chart for
+            each step — which you'll see listed under Charting Status afterward.
+          </p>
         </div>
       ) : (
         <p className="text-sm text-muted">Enter a target dose to preview the titration steps.</p>

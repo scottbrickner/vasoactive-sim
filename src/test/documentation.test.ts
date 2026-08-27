@@ -76,6 +76,19 @@ describe('documentation.checkCadence', () => {
       'plus30PostTitration2',
     ])
   })
+
+  it('marks the initiation checkpoint preSeeded when the 4th arg is true', () => {
+    const checks = checkCadence(0, [], [0], true)
+    const initiation = checks.find((c) => c.point === 'initiation')!
+    expect(initiation.preSeeded).toBe(true)
+  })
+
+  it('leaves the initiation checkpoint without a preSeeded field when the 4th arg is omitted or false', () => {
+    const omitted = checkCadence(0, [], [0])
+    const explicitFalse = checkCadence(0, [], [0], false)
+    expect(omitted.find((c) => c.point === 'initiation')!.preSeeded).toBeUndefined()
+    expect(explicitFalse.find((c) => c.point === 'initiation')!.preSeeded).toBeUndefined()
+  })
 })
 
 const norepiOrder: Order = {
@@ -185,5 +198,18 @@ describe('documentation.buildOutstandingChartingItems', () => {
   it('is empty for an order whose infusion never started', () => {
     const items = buildOutstandingChartingItems([norepiOrder], [norepiInfusion({ status: 'hanging' })], [], {})
     expect(items).toEqual([])
+  })
+
+  it('labels the initiation checkpoint as shift assessment charting for a pre-seeded (weaningSupport-style) order, vs. initiation charting for a learner-initiated one', () => {
+    // Pre-seeded: infusion already infusing, no real 'initiate' entry in the log at all.
+    const preSeededItems = buildOutstandingChartingItems([norepiOrder], [norepiInfusion()], [], {})
+    expect(preSeededItems.some((item) => /shift assessment charting/.test(item))).toBe(true)
+    expect(preSeededItems.some((item) => /initiation charting/.test(item))).toBe(false)
+
+    // Genuinely initiated: a real 'initiate' entry anchors the checkpoint instead.
+    const doseEntries = [doseEntry({ id: 'e1', minute: 0, doseAction: 'initiate' })]
+    const initiatedItems = buildOutstandingChartingItems([norepiOrder], [norepiInfusion()], doseEntries, { e1: true })
+    expect(initiatedItems.some((item) => /initiation charting/.test(item))).toBe(true)
+    expect(initiatedItems.some((item) => /shift assessment charting/.test(item))).toBe(false)
   })
 })

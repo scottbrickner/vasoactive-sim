@@ -8,6 +8,7 @@ const PASSING_CARD: Scorecard = {
   overallPercent: SKILL_SIGNOFF_CRITERIA.minOverallPercent,
   strengths: [],
   opportunities: [],
+  coachingNotes: [],
 }
 
 function baseParams(overrides: Partial<Parameters<typeof buildAttemptRecord>[0]> = {}) {

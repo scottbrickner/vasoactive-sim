@@ -34,6 +34,11 @@ export interface CadenceCheck {
   titrationIndex?: number
   dueAtMinute: number
   met: boolean
+  /** Set only on the 'initiation' checkpoint, and only when true: the infusion was
+   *  pre-seeded already infusing (a handoff/weaning-style scenario) rather than started
+   *  by this learner, so "initiation charting" is the wrong label for it — see
+   *  buildCadenceStatusForOrders' preSeededInfusion handling and cadenceLabel below. */
+  preSeeded?: boolean
 }
 
 /**
@@ -48,11 +53,18 @@ export interface CadenceCheck {
  * titration (or initiation) up to and including the current minute — not just an
  * exact-minute match — since a nurse may reasonably chart once and titrate shortly
  * after without re-clicking "Chart now" at the very same instant.
+ *
+ * `initiationWasPreSeeded` (default false) marks the 'initiation' checkpoint as
+ * belonging to an infusion that was already hanging when the learner took over,
+ * rather than one they actually started — see buildCadenceStatusForOrders' caller-side
+ * detection. It only affects that one checkpoint's `preSeeded` flag, purely a labeling
+ * concern for cadenceLabel; the due-minute/met logic is unchanged either way.
  */
 export function checkCadence(
   initiationMinute: number,
   titrationMinutes: number[],
   chartedMinutes: number[],
+  initiationWasPreSeeded = false,
 ): CadenceCheck[] {
   const checks: CadenceCheck[] = []
 
@@ -60,6 +72,7 @@ export function checkCadence(
     point: 'initiation',
     dueAtMinute: initiationMinute,
     met: chartedMinutes.includes(initiationMinute),
+    preSeeded: initiationWasPreSeeded || undefined,
   })
   checks.push({
     point: 'plus30Start',
@@ -128,7 +141,12 @@ export function buildCadenceStatusForOrders(
       {
         orderId: order.id,
         drugId: order.drugId,
-        checks: checkCadence(initiationMinute, titrationMinutes, chartedMinutes),
+        checks: checkCadence(
+          initiationMinute,
+          titrationMinutes,
+          chartedMinutes,
+          preSeededInfusion != null && initiation == null,
+        ),
       },
     ]
   })
@@ -137,7 +155,10 @@ export function buildCadenceStatusForOrders(
 function cadenceLabel(check: CadenceCheck): string {
   switch (check.point) {
     case 'initiation':
-      return 'initiation charting'
+      // Pre-seeded infusions (e.g. weaningSupport's 3 already-infusing pressors) were
+      // never "initiated" by this learner — a handoff nurse charts a shift assessment
+      // on takeover, not an initiation, so the label should say that instead.
+      return check.preSeeded ? 'shift assessment charting' : 'initiation charting'
     case 'plus30Start':
       return '+30 min after start'
     case 'preTitration':
