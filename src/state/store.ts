@@ -349,6 +349,27 @@ function applyPacingTrigger(
   })
 }
 
+/**
+ * Applies whatever clock advance was withheld while the decision point it triggered was
+ * still pending (see the SimStore doc comment on pendingClockAdvanceMinutes) — called the
+ * instant that decision resolves (chooseDecisionOption / dismissDecisionPoint), BEFORE
+ * whatever the learner picked runs its own course. A no-op when nothing was deferred
+ * (e.g. dismissing a decision point that isn't the kind submitDose/confirmDoseOverride/
+ * runMultiStepTitration ever defer for — defensive, not expected to matter in practice).
+ * Ordering matters: catching the clock up first means an option's own effect (which may
+ * itself trigger — and defer for — a brand-new decision point) always starts from a
+ * clean, non-deferred state, rather than stacking a second deferral on top of the first.
+ */
+function resolveDeferredClockAdvance(
+  get: () => Pick<SimStore, 'pendingClockAdvanceMinutes' | 'advanceClock'>,
+  set: (partial: Partial<SimStore>) => void,
+) {
+  const minutes = get().pendingClockAdvanceMinutes
+  if (minutes == null) return
+  set({ pendingClockAdvanceMinutes: null })
+  get().advanceClock(minutes)
+}
+
 function nextChannelLetter(infusions: Infusion[]): string {
   const used = new Set(infusions.map((i) => i.channel))
   for (const letter of ['A', 'B', 'C', 'D']) {
@@ -521,6 +542,15 @@ interface SimStore {
   pendingOverride: PendingOverride | null
   /** A triggered "what's your next move" decision point awaiting the learner's pick (Phase 18). */
   pendingDecisionPoint: PendingDecisionPoint | null
+  /**
+   * The clock advance a dose change earned, held back while a decision point it
+   * triggered is still pending (see resolveDeferredClockAdvance) — so the vitals a
+   * decision card describes can't drift past what it says before the learner even
+   * reads it. Applied the instant that decision resolves (chooseDecisionOption /
+   * dismissDecisionPoint), before whatever the learner picked runs its own course.
+   * Null whenever no decision point is pending.
+   */
+  pendingClockAdvanceMinutes: number | null
   /** Decision points already presented this session, keyed by decisionPointId — a once-per-session gate so a trigger (or its synthesized fallback) never re-fires after being shown. */
   decisionPointsShown: Record<string, boolean>
   /** Manual (non-leap) titration count since the last pacing offer, keyed by orderId — resets on offer/a decision point firing. */
@@ -653,6 +683,7 @@ function initialSimFields(
     blockOfChartingHistory: [] as BlockOfChartingRecord[],
     pendingOverride: null as PendingOverride | null,
     pendingDecisionPoint: null as PendingDecisionPoint | null,
+    pendingClockAdvanceMinutes: null as number | null,
     decisionPointsShown: {} as Record<string, boolean>,
     pacingTitrationsSinceOffer: {} as Record<string, number>,
     pendingPacingOffer: null as PendingPacingOffer | null,
@@ -1113,8 +1144,18 @@ export const useSimStore = create<SimStore>((set, get) => ({
     // Both initiating and titrating advance the clock by the order's own interval — the
     // pump doesn't know or care which kind of dose-change just happened. A facilitator-
     // driven-vs-auto pacing toggle is planned for Phase 10 — auto is the only mode until
-    // then.
-    get().advanceClock(order.interval.minMinutes)
+    // then. BUT when this same dose just triggered a decision point, the advance is
+    // withheld instead of applied — advancing right away would let vitals keep
+    // interpolating (and the wean-eligible clock check inside advanceClock keep firing)
+    // past the exact moment the card's authored text describes, so a nurse reading it a
+    // few seconds later could see a live number that already contradicts what the card
+    // says. It's applied instead the moment that decision resolves — see
+    // resolveDeferredClockAdvance.
+    if (triggeredDecisionPointId) {
+      set({ pendingClockAdvanceMinutes: order.interval.minMinutes })
+    } else {
+      get().advanceClock(order.interval.minMinutes)
+    }
 
     return entry
   },
@@ -1189,7 +1230,13 @@ export const useSimStore = create<SimStore>((set, get) => ({
     if (pending.action === 'titrate')
       applyPacingTrigger(get, set, order.id, crossedEarlyThreshold, pending.dose < (infusion?.rate ?? 0))
 
-    get().advanceClock(order.interval.minMinutes)
+    // Same deferred-advance treatment as submitDose's own applied path — see
+    // resolveDeferredClockAdvance.
+    if (triggeredDecisionPointId) {
+      set({ pendingClockAdvanceMinutes: order.interval.minMinutes })
+    } else {
+      get().advanceClock(order.interval.minMinutes)
+    }
   },
 
   cancelDoseOverride: () => {
@@ -1243,6 +1290,10 @@ export const useSimStore = create<SimStore>((set, get) => ({
     const option = dp?.options.find((o) => o.id === optionId)
     if (!dp || !option) return
     set({ pendingDecisionPoint: null })
+    // Catch the clock up to what the triggering dose already earned BEFORE running
+    // whatever the learner picked — see resolveDeferredClockAdvance's own doc for why
+    // this has to happen first, not after.
+    resolveDeferredClockAdvance(get, set)
 
     // Declining to act — no LogEntry, no scoring impact, the learner just resumes free
     // titration via the real dose-entry control. Doesn't unmark decisionPointsShown
@@ -1314,7 +1365,10 @@ export const useSimStore = create<SimStore>((set, get) => ({
     })
   },
 
-  dismissDecisionPoint: () => set({ pendingDecisionPoint: null }),
+  dismissDecisionPoint: () => {
+    set({ pendingDecisionPoint: null })
+    resolveDeferredClockAdvance(get, set)
+  },
 
   dismissPacingOffer: () => set({ pendingPacingOffer: null }),
 
@@ -1392,12 +1446,15 @@ export const useSimStore = create<SimStore>((set, get) => ({
         adherenceFlags: { ...s.adherenceFlags, [actionEntry.id]: true },
       })
       appliedCount += 1
-      get().advanceClock(order.interval.minMinutes)
 
-      // A plan that starts below a real decision-point trigger (e.g. from a pacing
-      // offer, unlike a decision option's own plan, which always starts AT the
-      // crossing dose) can cross one mid-flight — check every step, not just once at
-      // the start (see deriveTriggeredDecisionPointId).
+      // Check the decision trigger at the exact moment THIS dose applied — BEFORE
+      // advancing the clock for it — matching submitDose/confirmDoseOverride's own
+      // semantics (see resolveDeferredClockAdvance): a card must describe the instant
+      // its triggering dose landed, not a later moment after this step's own interval
+      // has already quietly moved the vitals further. A plan that starts below a real
+      // decision-point trigger (e.g. from a pacing offer, unlike a decision option's own
+      // plan, which always starts AT the crossing dose) can cross one mid-flight — check
+      // every step, not just once at the start (see deriveTriggeredDecisionPointId).
       const fresh = get()
       const triggeredId = deriveTriggeredDecisionPointId(
         fresh.scenario,
@@ -1412,12 +1469,18 @@ export const useSimStore = create<SimStore>((set, get) => ({
       )
       if (triggeredId) {
         // Stop here — the same real decision a manually-titrating nurse would hit at
-        // this exact dose takes over; no "steps applied" toast competing with the card.
+        // this exact dose takes over; no "steps applied" toast competing with the card,
+        // and this step's own clock advance (plus every remaining planned step) stays
+        // withheld until the decision resolves — see resolveDeferredClockAdvance.
         get().presentDecisionPoint(triggeredId)
-        set((st) => ({ pacingTitrationsSinceOffer: { ...st.pacingTitrationsSinceOffer, [orderId]: 0 } }))
+        set((st) => ({
+          pacingTitrationsSinceOffer: { ...st.pacingTitrationsSinceOffer, [orderId]: 0 },
+          pendingClockAdvanceMinutes: order.interval.minMinutes,
+        }))
         interruptedByDecisionPoint = true
         break
       }
+      get().advanceClock(order.interval.minMinutes)
     }
 
     if (!interruptedByDecisionPoint) {
