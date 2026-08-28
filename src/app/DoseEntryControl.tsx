@@ -140,7 +140,11 @@ export function DoseEntryControl({
             onClick={() => {
               if (infusion?.status === 'infusing') {
                 const entry = onTitrate(order.id, parsed)
-                if (entry) fireConfirm(`Titrated to ${parsed}`)
+                // A truthy entry only means an attempt was logged — hardLimitBlocked and
+                // needs-provider outcomes also return their (rejected) LogEntry so the
+                // decision-point precedence check in submitDose has something to key off,
+                // but the dose never reached the infusion. Only claim success when it did.
+                if (entry?.outcome === 'applied') fireConfirm(`Titrated to ${parsed}`)
               } else {
                 onRequestProgram(order.id, parsed)
               }

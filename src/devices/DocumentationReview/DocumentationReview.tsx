@@ -137,7 +137,16 @@ function summarizeRun(run: LogEntry[]): string {
     const last = doseEntries[doseEntries.length - 1]
     const drug = first.drugId ? getDrug(first.drugId) : null
     if (drug) {
-      parts.push(`${drug.name} ${first.dose} → ${last.dose} ${drug.unit}`)
+      // A run can collapse a single dose step paired with its own auto-charted
+      // documentation entry (e.g. one decision-panel-triggered titration) — with only one
+      // dose entry, first === last, and an arrow would misleadingly read as "no change"
+      // (e.g. "15 → 15") when a real step occurred. Only show the arrow once there's an
+      // actual range to report.
+      parts.push(
+        doseEntries.length > 1
+          ? `${drug.name} ${first.dose} → ${last.dose} ${drug.unit}`
+          : `${drug.name} to ${last.dose} ${drug.unit}`,
+      )
     }
   }
 
